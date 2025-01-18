@@ -8,9 +8,10 @@ from datetime import timedelta
 from typing import AsyncGenerator, cast, get_args
 
 import async_timeout
-import jwt
+import typer
 import orjson
 import uvicorn
+from typing_extensions import Annotated
 from fastapi import (
     Depends,
     FastAPI,
@@ -25,50 +26,19 @@ from pydantic import UUID4, ValidationError
 from .schemas import (
     BufferGateRequest,
     BufferGateResponse,
-    JWTPayload,
     Methods,
-    Settings,
 )
 
+def main(
+    client_token: Annotated[str, typer.Option(help="Token used to authenticate with PipeGate clients")],
+    port:  Annotated[int, typer.Option(help="Port to listen for websocket connections on")] = 443,
+    ssl_keyfile: Annotated[str, typer.Option(help="Path to the SSL keyfile for enabling https or wss connections. For LetsEncrypt generated SSL certs, this is the `privkey.pem` file.")] = None,
+    ssl_certfile: Annotated[str, typer.Option(help="Path to the SSL certfile for enabling https or wss connections. For LetsEncrypt generated SSL certs, this is the `fullchain.pem` file.")] = None
+):
+    app = create_app(client_token)
+    uvicorn.run(app, host="0.0.0.0", port=port, ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile)
 
-def get_settings(request: Request) -> Settings:
-    return request.app.extra["settings"]
-
-
-def verify_jwt_uuid_match(
-    connection_id: str,
-    request: Request,
-    settings: Settings = Depends(get_settings),
-) -> JWTPayload:
-    """
-    Verify the JWT token, validate its structure, and ensure the 'uuid' matches the path parameter.
-    """
-    authorization: str | None = request.headers.get("Authorization")
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401,
-            detail="Missing or invalid Authorization header",
-        )
-
-    token = authorization.split(" ", 1)[1]
-
-    decoded_payload = jwt.decode(
-        token,
-        settings.jwt_secret.get_secret_value(),
-        algorithms=settings.jwt_algorithms,
-    )
-    payload = JWTPayload.model_validate(decoded_payload)
-
-    # Verify that the token's UUID (sub) matches the path parameter connection_id
-    if payload.sub != connection_id:
-        raise HTTPException(
-            status_code=403, detail="Token UUID does not match path UUID"
-        )
-
-    return payload
-
-
-def create_app() -> FastAPI:
+def create_app(client_token: str) -> FastAPI:
     """
     Initialize and configure the FastAPI application.
 
@@ -93,7 +63,6 @@ def create_app() -> FastAPI:
         Yields:
             AsyncGenerator[None, None]: Yields control back to FastAPI.
         """
-        app.extra["settings"] = Settings(_cli_parse_args=False)
 
         try:
             yield
@@ -114,8 +83,7 @@ def create_app() -> FastAPI:
     async def handle_http_request(
         connection_id: str,
         request: Request,
-        path_slug: str = "",
-        payload: JWTPayload = Depends(verify_jwt_uuid_match),
+        path_slug: str = ""
     ) -> Response:
         """
         Handle incoming HTTP requests and forward them to the corresponding WebSocket connection.
@@ -181,6 +149,11 @@ def create_app() -> FastAPI:
             connection_id (str): The unique identifier for the WebSocket connection.
             websocket (WebSocket): The WebSocket connection object.
         """
+        if websocket.headers["PIPEGATE_CLIENT_TOKEN"] != client_token:
+           raise HTTPException(
+            status_code=403, detail="JWT Secret missing or invalid"
+        )
+
         await websocket.accept()
         print(f"WebSocket connection established for ID: {connection_id}")
 
@@ -231,7 +204,5 @@ def create_app() -> FastAPI:
 
     return app
 
-
 if __name__ == "__main__":
-    app = create_app()
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    typer.run(main)

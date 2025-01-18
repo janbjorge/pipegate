@@ -5,7 +5,9 @@ import asyncio
 import httpx
 import orjson
 import typer
+from typing_extensions import Annotated
 from websockets.asyncio.client import ClientConnection, connect
+from websockets.exceptions import ConnectionClosedError
 
 from .schemas import BufferGateRequest, BufferGateResponse
 
@@ -13,19 +15,16 @@ app = typer.Typer()
 
 
 @app.command()
-def start_client(target_url: str, server_url: str):
-    """
-    Start the PipeGate Client to expose a local server.
-
-    Args:
-        target_url (str): The server to route incoming traffic to.
-        server_url (str): The WebSocket server URL to connect to.
-    """
-    asyncio.run(main(target_url, server_url))
+def start_client(
+    local_url: Annotated[str, typer.Option(help="URL of the local server to forward requests to")],
+    server_url:  Annotated[str, typer.Option(help="URL of the PipeGate server to forward requests through")],
+    client_token: Annotated[str, typer.Option(help="Token used to authenticate with the PipeGate server")]
+):
+    asyncio.run(main(local_url, server_url, client_token))
 
 
 async def handle_request(
-    target: str,
+    local_url: str,
     request: BufferGateRequest,
     http_client: httpx.AsyncClient,
     ws_client: ClientConnection,
@@ -35,7 +34,7 @@ async def handle_request(
     and send back the response via WebSocket.
 
     Args:
-        target (str): The target URL for the local HTTP server.
+        local_url (str): The target URL for the local HTTP server.
         request (BufferGateRequest): The incoming request data.
         http_client (httpx.AsyncClient): The HTTP client for making requests.
         ws_client (ClientConnection): The WebSocket client for sending responses.
@@ -43,7 +42,7 @@ async def handle_request(
     try:
         response = await http_client.request(
             method=request.method,
-            url=f"{target}/{request.url_path}",
+            url=f"{local_url}/{request.url_path}",
             headers=orjson.loads(request.headers),
             params=orjson.loads(request.url_query),
             content=request.body.encode(),
@@ -69,7 +68,7 @@ async def handle_request(
     await ws_client.send(response_payload.model_dump_json())
 
 
-async def main(target_url: str, server_url: str) -> None:
+async def main(local_url: str, server_url: str, client_token: str) -> None:
     """
     Establish a WebSocket connection to the PipeGate server and handle incoming requests.
 
@@ -83,7 +82,7 @@ async def main(target_url: str, server_url: str) -> None:
     )
 
     try:
-        async with connect(server_url) as ws_client, httpx.AsyncClient() as http_client:
+        async with connect(uri=server_url, additional_headers={'PIPEGATE_CLIENT_TOKEN': client_token}) as ws_client, httpx.AsyncClient() as http_client:
             typer.secho("Connected to server.", fg=typer.colors.GREEN)
             async with asyncio.TaskGroup() as task_group:
                 while True:
@@ -92,13 +91,15 @@ async def main(target_url: str, server_url: str) -> None:
                         request = BufferGateRequest.model_validate_json(message)
                         task_group.create_task(
                             handle_request(
-                                target_url,
+                                local_url,
                                 request,
                                 http_client,
                                 ws_client,
                             )
                         )
                     except asyncio.CancelledError:
+                        break
+                    except ConnectionClosedError:
                         break
                     except Exception as e:
                         typer.secho(
