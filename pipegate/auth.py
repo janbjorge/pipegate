@@ -8,7 +8,23 @@ import jwt
 from .schemas import JWTPayload, Settings
 
 
+def verify_token(token: str, connection_id: str, settings: Settings) -> JWTPayload:
+    """Decode and verify a JWT token matches the given connection ID."""
+    decoded = jwt.decode(
+        token,
+        settings.jwt_secret.get_secret_value(),
+        algorithms=settings.jwt_algorithms,
+    )
+    payload = JWTPayload.model_validate(decoded)
+
+    if payload.sub != connection_id:
+        raise PermissionError("Token UUID does not match path UUID")
+
+    return payload
+
+
 def make_jwt_bearer() -> None:
+    """CLI helper: generate a connection ID and JWT token."""
     settings = Settings()
     connection_id = settings.connection_id or uuid.uuid4().hex
 
