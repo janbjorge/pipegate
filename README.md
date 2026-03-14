@@ -29,6 +29,8 @@ uv sync
 Or install directly:
 
 ```bash
+uv pip install git+https://github.com/janbjorge/pipegate.git
+# or
 pip install git+https://github.com/janbjorge/pipegate.git
 ```
 
@@ -131,8 +133,8 @@ PipeGate has minimal built-in security. Be aware of the following:
 ## Development
 
 ```bash
-uv sync                          # install deps (including dev group)
-.venv/bin/python -m pytest       # run tests (37 tests, zero warnings)
+uv sync          # install deps (including dev group)
+uv run pytest    # run tests (37 tests, zero warnings)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture overview and contribution guidelines.
