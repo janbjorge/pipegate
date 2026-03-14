@@ -8,7 +8,7 @@ import pytest
 from pipegate.auth import verify_token
 from pipegate.schemas import JWTPayload, Settings
 
-from .conftest import JWT_SECRET, make_token
+from .conftest import make_token
 
 
 class TestVerifyToken:

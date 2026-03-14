@@ -1,34 +1,35 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import uuid
 from datetime import timedelta
+from typing import cast
 
 import orjson
-import pytest
-from httpx import ASGITransport, AsyncClient
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient, Response
 
 from pipegate.schemas import BufferGateResponse, Settings
 from pipegate.server import create_app
 
 from .conftest import make_token
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_app_with_settings() -> object:
-    """Create an app and manually inject settings (lifespan doesn't run with raw ASGI)."""
+def _make_app_with_settings() -> FastAPI:
+    """Create app with settings injected (no lifespan under raw ASGI)."""
     app = create_app()
     app.extra["settings"] = Settings(_cli_parse_args=False)
     return app
 
 
 async def _ws_roundtrip(
-    app,
+    app: FastAPI,
     connection_id: str,
     token: str,
     *,
@@ -38,7 +39,7 @@ async def _ws_roundtrip(
     query: str = "",
     response_body: str = "tunnel-response",
     response_status: int = 200,
-) -> tuple:
+) -> tuple[Response, dict[str, str]]:
     """
     Simulate a full tunnel round-trip:
     1. HTTP client sends a request
@@ -54,11 +55,11 @@ async def _ws_roundtrip(
     if query:
         url += f"?{query}"
 
-    forwarded_request = {}
+    forwarded_request: dict[str, str] = {}
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
 
-        async def http_request():
+        async def http_request() -> Response:
             return await client.request(
                 method,
                 url,
@@ -66,8 +67,8 @@ async def _ws_roundtrip(
                 content=body,
             )
 
-        async def ws_client():
-            scope = {
+        async def ws_client() -> None:
+            scope: dict[str, object] = {
                 "type": "websocket",
                 "asgi": {"version": "3.0"},
                 "http_version": "1.1",
@@ -76,12 +77,14 @@ async def _ws_roundtrip(
                 "headers": [],
             }
 
-            inbox: asyncio.Queue = asyncio.Queue()
-            outbox: asyncio.Queue = asyncio.Queue()
+            inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
 
             await inbox.put({"type": "websocket.connect"})
 
-            app_task = asyncio.create_task(app(scope, inbox.get, outbox.put))
+            app_task = asyncio.create_task(
+                app(scope, inbox.get, outbox.put),  # type: ignore[arg-type]
+            )
 
             # Wait for accept
             msg = await asyncio.wait_for(outbox.get(), timeout=5)
@@ -91,7 +94,7 @@ async def _ws_roundtrip(
             msg = await asyncio.wait_for(outbox.get(), timeout=5)
             assert msg["type"] == "websocket.send"
 
-            fwd = json.loads(msg["text"])
+            fwd = json.loads(cast(str, msg["text"]))
             forwarded_request.update(fwd)
 
             # Send tunnel response back
@@ -112,10 +115,8 @@ async def _ws_roundtrip(
             await asyncio.sleep(0.05)
             await inbox.put({"type": "websocket.disconnect"})
 
-            try:
+            with contextlib.suppress(Exception):
                 await asyncio.wait_for(app_task, timeout=2)
-            except Exception:
-                pass
 
         # Run HTTP and WS concurrently — WS must start first so it's
         # ready to receive when the HTTP request enqueues into buffers.
