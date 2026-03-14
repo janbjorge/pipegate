@@ -8,7 +8,6 @@ from datetime import timedelta
 from typing import AsyncGenerator, cast, get_args
 
 import async_timeout
-import jwt
 import orjson
 import uvicorn
 from fastapi import (
@@ -22,6 +21,7 @@ from fastapi import (
 )
 from pydantic import UUID4, ValidationError
 
+from .auth import verify_token
 from .schemas import (
     BufferGateRequest,
     BufferGateResponse,
@@ -40,9 +40,6 @@ def verify_jwt_uuid_match(
     request: Request,
     settings: Settings = Depends(get_settings),
 ) -> JWTPayload:
-    """
-    Verify the JWT token, validate its structure, and ensure the 'uuid' matches the path parameter.
-    """
     authorization: str | None = request.headers.get("Authorization")
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
@@ -52,29 +49,15 @@ def verify_jwt_uuid_match(
 
     token = authorization.split(" ", 1)[1]
 
-    decoded_payload = jwt.decode(
-        token,
-        settings.jwt_secret.get_secret_value(),
-        algorithms=settings.jwt_algorithms,
-    )
-    payload = JWTPayload.model_validate(decoded_payload)
-
-    # Verify that the token's UUID (sub) matches the path parameter connection_id
-    if payload.sub != connection_id:
-        raise HTTPException(
-            status_code=403, detail="Token UUID does not match path UUID"
-        )
-
-    return payload
+    try:
+        return verify_token(token, connection_id, settings)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
 
 
 def create_app() -> FastAPI:
-    """
-    Initialize and configure the FastAPI application.
-
-    Returns:
-        FastAPI: The configured FastAPI application instance.
-    """
     buffers: collections.defaultdict[UUID4, asyncio.Queue[BufferGateRequest]] = (
         collections.defaultdict(asyncio.Queue)
     )
@@ -84,21 +67,11 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-        """
-        Define the application's lifespan events.
-
-        Args:
-            _: FastAPI: The FastAPI application instance.
-
-        Yields:
-            AsyncGenerator[None, None]: Yields control back to FastAPI.
-        """
         app.extra["settings"] = Settings(_cli_parse_args=False)
 
         try:
             yield
         finally:
-            # On shutdown, set exceptions for all pending futures to prevent hanging
             for fut in futures.values():
                 if not fut.done():
                     fut.set_exception(
@@ -117,17 +90,6 @@ def create_app() -> FastAPI:
         path_slug: str = "",
         payload: JWTPayload = Depends(verify_jwt_uuid_match),
     ) -> Response:
-        """
-        Handle incoming HTTP requests and forward them to the corresponding WebSocket connection.
-
-        Args:
-            connection_id (str): The unique identifier for the connection.
-            request (Request): The incoming HTTP request.
-            path_slug (str, optional): Additional path after the connection ID. Defaults to "".
-
-        Returns:
-            Response: The HTTP response received from the WebSocket client.
-        """
         correlation_id = uuid.uuid4()
 
         try:
@@ -174,20 +136,10 @@ def create_app() -> FastAPI:
         connection_id: str,
         websocket: WebSocket,
     ):
-        """
-        Manage WebSocket connections for sending and receiving data.
-
-        Args:
-            connection_id (str): The unique identifier for the WebSocket connection.
-            websocket (WebSocket): The WebSocket connection object.
-        """
         await websocket.accept()
         print(f"WebSocket connection established for ID: {connection_id}")
 
         async def receive():
-            """
-            Receive messages from the WebSocket and resolve pending futures.
-            """
             try:
                 while True:
                     message_text = await websocket.receive_text()
@@ -210,9 +162,6 @@ def create_app() -> FastAPI:
                 print(f"Unexpected error in receive handler: {e}")
 
         async def send():
-            """
-            Send messages from the buffer queue to the WebSocket.
-            """
             try:
                 while True:
                     request = await buffers[connection_id].get()
