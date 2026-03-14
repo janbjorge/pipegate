@@ -31,7 +31,7 @@ class TestBufferGateRequest:
                 correlation_id=uuid.uuid4(),
                 url_path="/",
                 url_query="{}",
-                method="INVALID",  # type: ignore[arg-type]
+                method="INVALID",
                 headers="{}",
                 body="",
             )
@@ -42,7 +42,7 @@ class TestBufferGateRequest:
                 correlation_id=uuid.uuid4(),
                 url_path="/",
                 url_query="{}",
-                method=method,  # type: ignore[arg-type]
+                method=method,
                 headers="{}",
                 body="",
             )

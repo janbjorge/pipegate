@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
 import pytest_asyncio
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from pipegate.schemas import Settings
@@ -58,15 +60,15 @@ def auth_headers(token: str) -> dict[str, str]:
 
 
 @pytest.fixture
-def app():
-    """Create a FastAPI app with settings pre-injected (lifespan doesn't run under ASGI transport)."""
+def app() -> FastAPI:
+    """Create app with settings pre-injected (no lifespan under ASGI transport)."""
     application = create_app()
     application.extra["settings"] = Settings(_cli_parse_args=False)
     return application
 
 
 @pytest_asyncio.fixture
-async def client(app) -> AsyncClient:
+async def client(app: FastAPI) -> AsyncGenerator[AsyncClient, None]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c

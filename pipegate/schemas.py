@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Literal
 
-from pydantic import UUID4, BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Methods = Literal[

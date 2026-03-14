@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import collections
 import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import AsyncGenerator, cast, get_args
+from typing import cast, get_args
 
 import async_timeout
 import orjson
@@ -19,7 +20,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from pydantic import UUID4, ValidationError
+from pydantic import ValidationError
 
 from .auth import verify_token
 from .schemas import (
@@ -32,13 +33,14 @@ from .schemas import (
 
 
 def get_settings(request: Request) -> Settings:
-    return request.app.extra["settings"]
+    settings: Settings = request.app.extra["settings"]
+    return settings
 
 
 def verify_jwt_uuid_match(
     connection_id: str,
     request: Request,
-    settings: Settings = Depends(get_settings),
+    settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> JWTPayload:
     authorization: str | None = request.headers.get("Authorization")
     if not authorization or not authorization.startswith("Bearer "):
@@ -52,16 +54,16 @@ def verify_jwt_uuid_match(
     try:
         return verify_token(token, connection_id, settings)
     except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
+        raise HTTPException(status_code=403, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=401, detail=str(e))
+        raise HTTPException(status_code=401, detail=str(e)) from e
 
 
 def create_app() -> FastAPI:
-    buffers: collections.defaultdict[UUID4, asyncio.Queue[BufferGateRequest]] = (
-        collections.defaultdict(asyncio.Queue)
+    buffers: dict[str, asyncio.Queue[BufferGateRequest]] = collections.defaultdict(
+        asyncio.Queue
     )
-    futures: collections.defaultdict[UUID4, asyncio.Future[BufferGateResponse]] = (
+    futures: dict[uuid.UUID, asyncio.Future[BufferGateResponse]] = (
         collections.defaultdict(asyncio.Future)
     )
 
@@ -88,7 +90,7 @@ def create_app() -> FastAPI:
         connection_id: str,
         request: Request,
         path_slug: str = "",
-        payload: JWTPayload = Depends(verify_jwt_uuid_match),
+        payload: JWTPayload = Depends(verify_jwt_uuid_match),  # noqa: B008
     ) -> Response:
         correlation_id = uuid.uuid4()
 
@@ -120,8 +122,8 @@ def create_app() -> FastAPI:
         try:
             async with async_timeout.timeout(timeout.total_seconds()):
                 response = await futures[correlation_id]
-        except asyncio.TimeoutError:
-            raise HTTPException(status_code=504, detail="Gateway Timeout")
+        except TimeoutError as e:
+            raise HTTPException(status_code=504, detail="Gateway Timeout") from e
         finally:
             futures.pop(correlation_id, None)
 
@@ -135,11 +137,11 @@ def create_app() -> FastAPI:
     async def handle_websocket(
         connection_id: str,
         websocket: WebSocket,
-    ):
+    ) -> None:
         await websocket.accept()
         print(f"WebSocket connection established for ID: {connection_id}")
 
-        async def receive():
+        async def receive() -> None:
             try:
                 while True:
                     message_text = await websocket.receive_text()
@@ -149,9 +151,8 @@ def create_app() -> FastAPI:
                         if future and not future.done():
                             future.set_result(message)
                         else:
-                            print(
-                                f"No pending future for correlation ID: {message.correlation_id}"
-                            )
+                            cid = message.correlation_id
+                            print(f"No pending future for: {cid}")
                     except ValidationError as ve:
                         print(f"Invalid message format: {ve}")
                     except Exception as e:
@@ -161,7 +162,7 @@ def create_app() -> FastAPI:
             except Exception as e:
                 print(f"Unexpected error in receive handler: {e}")
 
-        async def send():
+        async def send() -> None:
             try:
                 while True:
                     request = await buffers[connection_id].get()
