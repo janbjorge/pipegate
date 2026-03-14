@@ -4,7 +4,7 @@ A lightweight, self-hosted tunneling proxy built with FastAPI. Expose local serv
 
 ## How It Works
 
-PipeGate has two sides: a **server** you deploy on public infrastructure, and a **client** that runs on your local machine (client not yet included — bring your own WebSocket client for now).
+PipeGate has two sides: a **server** you deploy on public infrastructure, and a **client** that runs on your local machine.
 
 1. The server accepts incoming HTTP requests at `/{connection_id}/{path}`.
 2. A WebSocket client connects to `/{connection_id}` and receives forwarded requests.
@@ -82,21 +82,30 @@ python -m pipegate.server
 
 Binds to `0.0.0.0:8000` by default. To change the host/port, edit the `uvicorn.run()` call in `server.py`.
 
-### 3. Connect a WebSocket Client
+### 3. Start the Client
+
+```bash
+python -m pipegate.client http://localhost:3000 ws://yourserver:8000/{connection_id}
+```
+
+Arguments:
+
+- `target_url` — the local service to forward requests to (e.g. `http://localhost:3000`)
+- `server_url` — the PipeGate server WebSocket endpoint (e.g. `ws://yourserver:8000/a1b2c3d4`)
+
+The client connects to the server via WebSocket, receives forwarded requests, proxies them to your local service, and sends responses back through the tunnel.
+
+### Endpoints
 
 The server exposes two endpoints:
 
 - **`GET/POST/PUT/DELETE/PATCH/OPTIONS/HEAD /{connection_id}/{path}`** — authenticated HTTP endpoint. Requires `Authorization: Bearer <jwt>` header.
 - **`WS /{connection_id}`** — WebSocket endpoint for tunnel clients.
 
-Connect a WebSocket client to `ws://yourserver:8000/{connection_id}`. The client will receive JSON messages matching the `BufferGateRequest` schema and must respond with `BufferGateResponse` messages.
-
-> **Note:** A built-in client module is not yet included. You'll need to implement your own WebSocket client or use an existing one. See `pipegate/schemas.py` for the request/response message formats.
-
 ### Example Flow
 
 ```
-External caller                PipeGate server              Your WS client          Local service
+External caller                PipeGate server              PipeGate client         Local service
       |                              |                            |                       |
       |-- POST /my-api/webhook -->   |                            |                       |
       |                              |-- WS: BufferGateRequest -> |                       |
@@ -123,7 +132,7 @@ PipeGate has minimal built-in security. Be aware of the following:
 
 ```bash
 uv sync                          # install deps (including dev group)
-.venv/bin/python -m pytest       # run tests (25 tests, zero warnings)
+.venv/bin/python -m pytest       # run tests (37 tests, zero warnings)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture overview and contribution guidelines.
