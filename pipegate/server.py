@@ -88,6 +88,10 @@ def create_app() -> FastAPI:
     # Also store outside of lifespan so tests that skip lifespan can access it
     app.extra["buffers"] = buffers
 
+    @app.get("/healthz")  # #17: must be registered before the catch-all route
+    async def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
     @app.api_route(
         "/{connection_id}/{path_slug:path}",
         methods=list(get_args(Methods)),
@@ -164,8 +168,14 @@ def create_app() -> FastAPI:
             futures.pop(correlation_id, None)
             connection_futures[connection_id].discard(correlation_id)
 
+        # HEAD responses must have no body per HTTP spec.  (#16)
+        response_content = (
+            b""
+            if request.method == "HEAD"
+            else (base64.b64decode(response.body) if response.body else b"")
+        )
         return Response(
-            content=base64.b64decode(response.body) if response.body else b"",  # #7
+            content=response_content,
             headers=orjson.loads(response.headers) if response.headers else {},
             status_code=response.status_code,
         )
