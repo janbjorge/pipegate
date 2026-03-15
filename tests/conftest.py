@@ -55,11 +55,6 @@ def token(connection_id: str) -> str:
 
 
 @pytest.fixture
-def auth_headers(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
-
-
-@pytest.fixture
 def app() -> FastAPI:
     """Create app with settings pre-injected (no lifespan under ASGI transport)."""
     application = create_app()

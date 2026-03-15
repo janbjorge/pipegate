@@ -104,8 +104,8 @@ The client connects to the server via WebSocket, receives forwarded requests, pr
 | Endpoint | Auth | Description |
 |---|---|---|
 | `GET /healthz` | None | Health check — returns `{"status": "ok"}` with HTTP 200 |
-| `GET POST PUT DELETE PATCH OPTIONS HEAD /{connection_id}/{path}` | `Authorization: Bearer <jwt>` | Tunnel HTTP endpoint |
-| `WS /{connection_id}?token=<jwt>` | `?token=` query param | WebSocket endpoint for tunnel clients |
+| `GET POST PUT DELETE PATCH OPTIONS HEAD /{connection_id}/{path}` | None | Tunnel HTTP endpoint — auth is the downstream app's responsibility |
+| `WS /{connection_id}?token=<jwt>` | `?token=<jwt>` (required) | WebSocket endpoint for tunnel clients |
 
 ### Example Flow
 
@@ -122,6 +122,113 @@ External caller                PipeGate server              PipeGate client     
 
 Requests time out after **300 seconds** (5 minutes). If the tunnel client disconnects while requests are in-flight, those requests fail immediately with 503 rather than waiting for the timeout.
 
+## Examples
+
+### Basic: Expose a local dev server
+
+You're building a web app on `localhost:3000` and need to share it with a teammate or test a third-party OAuth redirect.
+
+```bash
+# 1. Set secrets
+export PIPEGATE_JWT_SECRET="super-secret-change-me"
+export PIPEGATE_JWT_ALGORITHMS='["HS256"]'
+
+# 2. Deploy the server (on any public host), then generate a token locally
+python -m pipegate.auth
+# Connection-id: 4f9a1c2b8e3d...
+# JWT Bearer:    eyJhbGciOiJIUzI1NiIs...
+
+# 3. Start your local app (whatever it is)
+npm run dev  # → http://localhost:3000
+
+# 4. Open the tunnel
+python -m pipegate.client \
+  http://localhost:3000 \
+  "ws://yourserver:8000/4f9a1c2b8e3d?token=eyJhbGciOiJIUzI1NiIs..."
+# Connecting to server at ws://yourserver:8000/4f9a1c2b8e3d...
+# Connected to server.
+
+# 5. Anyone can now reach your local app — no auth needed on the HTTP side
+curl https://yourserver:8000/4f9a1c2b8e3d/api/hello
+```
+
+---
+
+### Advanced: Production webhook receiver with human-readable IDs
+
+You're integrating Stripe webhooks. You want a stable, readable URL and need to run two independent tunnels (one per environment) from the same PipeGate server using a single shared secret.
+
+**Server side** (deployed at `https://tunnel.example.com`):
+
+```bash
+export PIPEGATE_JWT_SECRET="$(openssl rand -hex 32)"
+export PIPEGATE_JWT_ALGORITHMS='["HS256"]'
+export PIPEGATE_MAX_BODY_BYTES=1048576   # 1 MB — enough for any webhook payload
+export PIPEGATE_MAX_QUEUE_DEPTH=50       # shed load fast; don't pile up webhooks
+
+python -m pipegate.server
+```
+
+**Generate tokens — one per environment, each bound to its own connection ID:**
+
+```bash
+# Staging token — sub claim locked to "stripe-staging"
+PIPEGATE_CONNECTION_ID=stripe-staging python -m pipegate.auth
+# Connection-id: stripe-staging
+# JWT Bearer:    eyJhbGciOiJIUzI1NiIs... (TOKEN_STAGING)
+
+# Production token — sub claim locked to "stripe-prod"
+PIPEGATE_CONNECTION_ID=stripe-prod python -m pipegate.auth
+# Connection-id: stripe-prod
+# JWT Bearer:    eyJhbGciOiJIUzI1NiIs... (TOKEN_PROD)
+```
+
+Each JWT is cryptographically bound to its connection ID — `TOKEN_STAGING` cannot be used on `/stripe-prod/...` (returns 403).
+
+**Local machines open their tunnels independently:**
+
+```bash
+# On the staging machine
+python -m pipegate.client \
+  http://localhost:4000 \
+  "wss://tunnel.example.com/stripe-staging?token=$TOKEN_STAGING"
+
+# On the production machine (or CI runner)
+python -m pipegate.client \
+  http://localhost:4000 \
+  "wss://tunnel.example.com/stripe-prod?token=$TOKEN_PROD"
+```
+
+**Configure Stripe to POST to your public endpoints:**
+
+```
+Staging:    https://tunnel.example.com/stripe-staging/webhooks/stripe
+Production: https://tunnel.example.com/stripe-prod/webhooks/stripe
+```
+
+**Stripe posts directly — no PipeGate auth header needed on the HTTP side:**
+
+```bash
+curl -X POST https://tunnel.example.com/stripe-prod/webhooks/stripe \
+  -H "Content-Type: application/json" \
+  -d '{"type": "payment_intent.succeeded", "data": {...}}'
+```
+
+PipeGate tunnels the request to `http://localhost:4000/webhooks/stripe` on the production machine, your handler responds, and the response travels back to Stripe — all in under a second. Your app handles its own auth (Stripe signature, API keys, etc.) as normal.
+
+**Key guarantees in this setup:**
+
+| Scenario | Behaviour |
+|---|---|
+| Tunnel client is offline | Caller gets `503` immediately — no 5-minute hang |
+| Stripe sends a 2 MB payload | Rejected with `413` at the server before hitting the queue |
+| Webhook burst (> 50 queued) | Excess requests get `503`, protecting the local service |
+| Client crashes and restarts | Reconnects automatically with exponential backoff |
+| Someone tries `TOKEN_STAGING` on `/stripe-prod/` | `403 Forbidden` — tokens are ID-scoped |
+| File upload or binary body | Transparently base64-encoded through the tunnel |
+
+---
+
 ## HTTP Behaviour
 
 - **Binary bodies** — request and response bodies are base64-encoded for transport, so file uploads, protobuf, and any non-UTF-8 content are handled correctly.
@@ -132,8 +239,8 @@ Requests time out after **300 seconds** (5 minutes). If the tunnel client discon
 
 ## Security
 
-- **HTTP endpoints require JWT auth** — requests without a valid `Authorization: Bearer <token>` header are rejected with 401/403.
-- **WebSocket endpoint requires JWT auth** — the token is passed as a `?token=<jwt>` query parameter (WebSocket clients cannot send custom headers). Connections without a valid token are rejected with close code 1008 before being accepted.
+- **HTTP endpoints are open** — PipeGate does not authenticate proxied HTTP traffic. Auth is the downstream application's responsibility (API keys, Stripe signatures, session cookies, etc.). If your downstream app has no auth of its own, use a hard-to-guess connection ID (e.g. `uuid4().hex`) rather than a short human-readable slug.
+- **WebSocket tunnel clients require JWT auth** — the token is passed as `?token=<jwt>` (WebSocket clients cannot send custom headers). Connections without a valid, unexpired token are rejected with close code 1008 before being accepted. This prevents anyone from hijacking your tunnel.
 - Use **HTTPS/WSS** in production to encrypt traffic and prevent token interception.
 - Use a strong, random `PIPEGATE_JWT_SECRET`.
 - Tokens are valid for 21 days — rotate them periodically.
