@@ -46,3 +46,11 @@ class Settings(BaseSettings):
     connection_id: str | None = Field(alias="PIPEGATE_CONNECTION_ID", default=None)
     jwt_secret: SecretStr = Field(alias="PIPEGATE_JWT_SECRET")
     jwt_algorithms: list[str] = Field(alias="PIPEGATE_JWT_ALGORITHMS")
+    max_body_bytes: int = Field(
+        alias="PIPEGATE_MAX_BODY_BYTES",
+        default=10 * 1024 * 1024,  # 10 MB  (#14)
+    )
+    max_queue_depth: int = Field(
+        alias="PIPEGATE_MAX_QUEUE_DEPTH",
+        default=100,  # (#15)
+    )

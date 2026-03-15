@@ -373,20 +373,56 @@ class TestMain:
         assert send_event.is_set(), "ws_mock.send was never called"
 
     async def test_connection_refused(self) -> None:
-        """main() handles ConnectionRefusedError gracefully."""
+        """main() catches ConnectionRefusedError and retries (does not exit)."""
+        import contextlib
+
+        call_count = 0
         connect_cm = AsyncMock()
-        connect_cm.__aenter__ = AsyncMock(side_effect=ConnectionRefusedError("refused"))
+
+        async def side_effect(*a: object, **kw: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ConnectionRefusedError("refused")
+            raise asyncio.CancelledError()
+
+        connect_cm.__aenter__ = side_effect
         connect_cm.__aexit__ = AsyncMock(return_value=False)
-        with patch("pipegate.client.connect", return_value=connect_cm):
+
+        with (
+            contextlib.suppress(asyncio.CancelledError),
+            patch("pipegate.client.connect", return_value=connect_cm),
+            patch("pipegate.client.asyncio.sleep", new_callable=AsyncMock),
+        ):
             await main("http://localhost:9000", "ws://fake:8000/conn")
 
+        assert call_count >= 2, "main() must retry after ConnectionRefusedError"
+
     async def test_os_error(self) -> None:
-        """main() handles OSError (e.g. DNS failure) gracefully."""
+        """main() catches OSError and retries (does not exit)."""
+        import contextlib
+
+        call_count = 0
         connect_cm = AsyncMock()
-        connect_cm.__aenter__ = AsyncMock(side_effect=OSError("network unreachable"))
+
+        async def side_effect(*a: object, **kw: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise OSError("network unreachable")
+            raise asyncio.CancelledError()
+
+        connect_cm.__aenter__ = side_effect
         connect_cm.__aexit__ = AsyncMock(return_value=False)
-        with patch("pipegate.client.connect", return_value=connect_cm):
+
+        with (
+            contextlib.suppress(asyncio.CancelledError),
+            patch("pipegate.client.connect", return_value=connect_cm),
+            patch("pipegate.client.asyncio.sleep", new_callable=AsyncMock),
+        ):
             await main("http://localhost:9000", "ws://fake:8000/conn")
+
+        assert call_count >= 2, "main() must retry after OSError"
 
 
 # ---------------------------------------------------------------------------
@@ -410,3 +446,74 @@ class TestCLI:
         with open(source.origin) as f:
             content = f.read()
         assert 'if __name__ == "__main__":' in content
+
+
+# ---------------------------------------------------------------------------
+# Feature #12 — Client reconnect with exponential backoff
+# ---------------------------------------------------------------------------
+
+
+class TestClientReconnect:
+    async def test_reconnects_after_disconnect(self) -> None:
+        """main() must retry with exponential backoff after a disconnect."""
+        import contextlib
+
+        call_count = 0
+        max_calls = 3
+        connect_mock = AsyncMock()
+
+        async def side_effect(*args: object, **kwargs: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count < max_calls:
+                raise ConnectionRefusedError("refused")
+            raise asyncio.CancelledError()
+
+        connect_mock.__aenter__ = side_effect
+        connect_mock.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            contextlib.suppress(asyncio.CancelledError),
+            patch("pipegate.client.connect", return_value=connect_mock),
+            patch(
+                "pipegate.client.asyncio.sleep", new_callable=AsyncMock
+            ) as sleep_mock,
+        ):
+            await main("http://localhost:9000", "ws://fake:8000/conn")
+
+        assert call_count >= 2
+        assert sleep_mock.called, "Expected asyncio.sleep for backoff"
+
+    async def test_backoff_delay_increases(self) -> None:
+        """Each retry must sleep for longer than the previous one."""
+        import contextlib
+
+        sleep_delays: list[float] = []
+        call_count = 0
+        connect_mock = AsyncMock()
+
+        async def side_effect(*args: object, **kwargs: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count < 4:
+                raise ConnectionRefusedError("refused")
+            raise asyncio.CancelledError()
+
+        connect_mock.__aenter__ = side_effect
+        connect_mock.__aexit__ = AsyncMock(return_value=False)
+
+        async def mock_sleep(delay: float) -> None:
+            sleep_delays.append(delay)
+
+        with (
+            contextlib.suppress(asyncio.CancelledError),
+            patch("pipegate.client.connect", return_value=connect_mock),
+            patch("pipegate.client.asyncio.sleep", side_effect=mock_sleep),
+        ):
+            await main("http://localhost:9000", "ws://fake:8000/conn")
+
+        assert len(sleep_delays) >= 2
+        for i in range(1, len(sleep_delays)):
+            assert sleep_delays[i] >= sleep_delays[i - 1], (
+                f"Backoff not increasing: {sleep_delays}"
+            )
