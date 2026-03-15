@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import uuid
@@ -97,11 +98,11 @@ async def _ws_roundtrip(
             fwd = json.loads(cast(str, msg["text"]))
             forwarded_request.update(fwd)
 
-            # Send tunnel response back
+            # Send tunnel response back — body must be base64-encoded
             response = BufferGateResponse(
                 correlation_id=fwd["correlation_id"],
                 headers=orjson.dumps({"x-tunnel": "ok"}).decode(),
-                body=response_body,
+                body=base64.b64encode(response_body.encode()).decode(),
                 status_code=response_status,
             )
             await inbox.put(
@@ -209,7 +210,8 @@ class TestTunnelRoundTrip:
 
         assert resp.status_code == 200
         assert fwd["method"] == "POST"
-        assert fwd["body"] == "hello"
+        # body is base64-encoded for binary-safe transport
+        assert base64.b64decode(fwd["body"]) == b"hello"
 
     async def test_preserves_query_params(self, connection_id: str) -> None:
         app = _make_app_with_settings()
@@ -219,7 +221,8 @@ class TestTunnelRoundTrip:
 
         assert resp.status_code == 200
         query = json.loads(fwd["url_query"])
-        assert query == {"a": "1", "b": "2"}
+        assert isinstance(query, list)
+        assert sorted(query) == [["a", "1"], ["b", "2"]]
 
     async def test_custom_response_status(self, connection_id: str) -> None:
         app = _make_app_with_settings()
@@ -258,3 +261,472 @@ class TestTunnelRoundTrip:
 
         headers = json.loads(fwd["headers"])
         assert "x-pipegate-correlation-id" in headers
+
+
+# ---------------------------------------------------------------------------
+# Bug #1 — Race condition: future created after enqueue
+# ---------------------------------------------------------------------------
+
+
+class TestRaceConditionFutureBeforeEnqueue:
+    async def test_future_exists_in_dict_before_ws_receive_can_see_it(
+        self, connection_id: str
+    ) -> None:
+        """
+        Simulate the race directly: a WS receive() handler calls futures.get()
+        for a correlation_id immediately after the HTTP request is enqueued but
+        before `await futures[correlation_id]` in the HTTP handler has run.
+
+        With the original code (defaultdict + .get()) the future is None at
+        that point and the response is dropped.  After the fix the future is
+        pre-created *before* the enqueue, so futures.get() always returns a
+        live Future regardless of timing.
+        """
+        import collections as _collections
+        import uuid as _uuid
+
+        loop = asyncio.get_event_loop()
+
+        # Reproduce the original broken pattern
+        futures_broken: dict[_uuid.UUID, asyncio.Future[BufferGateResponse]] = (
+            _collections.defaultdict(loop.create_future)  # type: ignore[arg-type]
+        )
+
+        cid = _uuid.uuid4()
+
+        # Simulate: WS receive() fires BEFORE HTTP handler accesses futures[cid]
+        future_seen_by_ws = futures_broken.get(cid)  # old code path: .get()
+
+        # Under the old approach the future hasn't been created yet → None
+        assert future_seen_by_ws is None, (
+            "Broken pattern: futures.get() returned non-None before HTTP handler "
+            "accessed the key — race is not reproducible in this environment"
+        )
+
+        # Now simulate the fixed pattern: future pre-created before enqueue
+        futures_fixed: dict[_uuid.UUID, asyncio.Future[BufferGateResponse]] = {}
+        cid2 = _uuid.uuid4()
+        futures_fixed[cid2] = loop.create_future()
+
+        # WS receive() can now always find the future
+        future_seen_after_fix = futures_fixed.get(cid2)
+        assert future_seen_after_fix is not None, (
+            "Fixed pattern must have the future present before enqueue"
+        )
+        assert not future_seen_after_fix.done()
+
+    async def test_response_received_even_when_ws_replies_before_http_awaits(
+        self, connection_id: str
+    ) -> None:
+        """
+        End-to-end: the WS tunnel client replies immediately (no extra yields).
+        The HTTP caller must still receive the correct response — no 504 timeout.
+        """
+        app = _make_app_with_settings()
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response_sent = asyncio.Event()
+
+            async def instant_ws_client() -> None:
+                scope: dict[str, object] = {
+                    "type": "websocket",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "path": f"/{connection_id}",
+                    "query_string": b"",
+                    "headers": [],
+                }
+                inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+                await inbox.put({"type": "websocket.connect"})
+                app_task = asyncio.create_task(
+                    app(scope, inbox.get, outbox.put),  # type: ignore[arg-type]
+                )
+
+                msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                assert msg["type"] == "websocket.accept"
+
+                msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                assert msg["type"] == "websocket.send"
+                fwd = json.loads(cast(str, msg["text"]))
+
+                # Reply with NO extra yield — maximise race window
+                resp = BufferGateResponse(
+                    correlation_id=fwd["correlation_id"],
+                    headers=orjson.dumps({"x-race": "test"}).decode(),
+                    body=base64.b64encode(b"race-response").decode(),
+                    status_code=200,
+                )
+                await inbox.put(
+                    {"type": "websocket.receive", "text": resp.model_dump_json()}
+                )
+                response_sent.set()
+
+                await asyncio.sleep(0.1)
+                await inbox.put({"type": "websocket.disconnect"})
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(app_task, timeout=2)
+
+            ws_task = asyncio.create_task(instant_ws_client())
+            await asyncio.sleep(0.01)
+
+            http_resp = await asyncio.wait_for(
+                client.get(
+                    f"/{connection_id}/ping",
+                    headers={"Authorization": f"Bearer {token}"},
+                ),
+                timeout=10,
+            )
+
+            await ws_task
+
+        assert response_sent.is_set(), "WS never sent a response"
+        assert http_resp.status_code == 200, (
+            f"Expected 200 but got {http_resp.status_code} — "
+            "response was likely dropped due to race condition"
+        )
+        assert http_resp.text == "race-response"
+
+
+# ---------------------------------------------------------------------------
+# Bug #2 — Dropped message on WebSocket disconnect during send()
+# ---------------------------------------------------------------------------
+
+
+class TestDroppedMessageOnDisconnect:
+    async def test_future_fails_immediately_when_ws_disconnects_during_send(
+        self, connection_id: str
+    ) -> None:
+        """
+        When the WebSocket disconnects while send() is forwarding a queued
+        request, the waiting HTTP future must be resolved immediately with an
+        error (not left to time out after 300 s).
+        """
+        from fastapi.websockets import WebSocketDisconnect as _WSD
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        app = _make_app_with_settings()
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            send_attempted = asyncio.Event()
+
+            async def disconnecting_ws_client() -> None:
+                scope: dict[str, object] = {
+                    "type": "websocket",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "path": f"/{connection_id}",
+                    "query_string": b"",
+                    "headers": [],
+                }
+                inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+                await inbox.put({"type": "websocket.connect"})
+
+                async def patched_send(message: dict[str, object]) -> None:
+                    if message.get("type") == "websocket.send":
+                        send_attempted.set()
+                        raise _WSD(code=1006, reason="simulated disconnect")
+                    await outbox.put(message)
+
+                app_task = asyncio.create_task(
+                    app(scope, inbox.get, patched_send),  # type: ignore[arg-type]
+                )
+
+                # Wait for accept
+                msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                assert msg["type"] == "websocket.accept"
+
+                # Wait for send to be attempted (and fail)
+                await asyncio.wait_for(send_attempted.wait(), timeout=5)
+
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(app_task, timeout=3)
+
+            ws_task = asyncio.create_task(disconnecting_ws_client())
+            await asyncio.sleep(0.01)
+
+            # The HTTP request should fail quickly (5 s), not wait 300 s
+            http_resp = await asyncio.wait_for(
+                client.get(
+                    f"/{connection_id}/ping",
+                    headers={"Authorization": f"Bearer {token}"},
+                ),
+                timeout=5,
+            )
+
+            await ws_task
+
+        # Must get a 5xx error immediately, not a 504 after 300 s timeout
+        assert http_resp.status_code in (502, 503), (
+            f"Expected 502 or 503 on disconnect, got {http_resp.status_code}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bug #3 — buffers defaultdict leaks on connection close
+# ---------------------------------------------------------------------------
+
+
+class TestBuffersCleanupOnDisconnect:
+    async def test_buffer_entry_removed_after_websocket_disconnects(
+        self, connection_id: str
+    ) -> None:
+        """
+        After a WebSocket client disconnects, its entry in the buffers dict
+        must be removed.  With the original code (no cleanup) the queue entry
+        lives forever — one entry per connection_id that ever connected.
+        """
+        app = _make_app_with_settings()
+
+        scope: dict[str, object] = {
+            "type": "websocket",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "path": f"/{connection_id}",
+            "query_string": b"",
+            "headers": [],
+        }
+        inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+        await inbox.put({"type": "websocket.connect"})
+        app_task = asyncio.create_task(
+            app(scope, inbox.get, outbox.put),  # type: ignore[arg-type]
+        )
+
+        # Wait for accept
+        msg = await asyncio.wait_for(outbox.get(), timeout=5)
+        assert msg["type"] == "websocket.accept"
+
+        # Disconnect immediately
+        await inbox.put({"type": "websocket.disconnect"})
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(app_task, timeout=2)
+
+        # The buffer entry must have been removed
+        buffers: dict[str, object] = app.extra.get("buffers", {})
+        assert connection_id not in buffers, (
+            f"buffers[{connection_id!r}] was not cleaned up after disconnect"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bug #4 — async-timeout is a redundant dependency
+# ---------------------------------------------------------------------------
+
+
+class TestNoAsyncTimeoutDependency:
+    def test_server_does_not_import_async_timeout(self) -> None:
+        """server.py must use asyncio.timeout() (stdlib) not async_timeout."""
+        import pipegate.server as server_mod
+
+        assert not hasattr(server_mod, "async_timeout"), (
+            "server.py still imports async_timeout; replace with asyncio.timeout()"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bug #5 — Duplicate query parameters silently lost
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateQueryParams:
+    async def test_duplicate_params_preserved_in_forwarded_request(
+        self, connection_id: str
+    ) -> None:
+        """
+        ?a=1&a=2 must not be collapsed to {"a": "2"}.
+        The forwarded url_query must carry both values.
+        """
+        app = _make_app_with_settings()
+        token = make_token(connection_id)
+
+        resp, fwd = await _ws_roundtrip(app, connection_id, token, query="a=1&a=2&b=3")
+
+        assert resp.status_code == 200
+        query = json.loads(fwd["url_query"])
+        # Must be a list of pairs, not a collapsed dict
+        assert isinstance(query, list), (
+            f"url_query should be a list of pairs, got {type(query)}: {query}"
+        )
+        pairs = [(k, v) for k, v in query]
+        a_values = [v for k, v in pairs if k == "a"]
+        assert sorted(a_values) == ["1", "2"], (
+            f"Both values for 'a' must be present, got {a_values}"
+        )
+        b_values = [v for k, v in pairs if k == "b"]
+        assert b_values == ["3"]
+
+
+# ---------------------------------------------------------------------------
+# Bug #6 — Binary request body corruption
+# ---------------------------------------------------------------------------
+
+
+class TestBinaryRequestBody:
+    async def test_binary_body_survives_round_trip(self, connection_id: str) -> None:
+        """
+        A binary (non-UTF-8) request body must be forwarded intact.
+        With the old `.decode()` approach this would raise UnicodeDecodeError
+        or silently corrupt the data.
+        """
+        binary_body = bytes(range(256))
+
+        app = _make_app_with_settings()
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        received_body: list[str] = []
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+
+            async def ws_client_side() -> None:
+                scope: dict[str, object] = {
+                    "type": "websocket",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "path": f"/{connection_id}",
+                    "query_string": b"",
+                    "headers": [],
+                }
+                inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+                await inbox.put({"type": "websocket.connect"})
+                app_task = asyncio.create_task(
+                    app(scope, inbox.get, outbox.put),  # type: ignore[arg-type]
+                )
+
+                msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                assert msg["type"] == "websocket.accept"
+
+                msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                assert msg["type"] == "websocket.send"
+                fwd = json.loads(cast(str, msg["text"]))
+
+                received_body.append(fwd["body"])
+
+                # Body should be base64-encoded, not a raw string
+                decoded = base64.b64decode(fwd["body"])
+                assert decoded == binary_body, (
+                    "Binary body was corrupted during transport"
+                )
+
+                resp = BufferGateResponse(
+                    correlation_id=fwd["correlation_id"],
+                    headers=orjson.dumps({}).decode(),
+                    body=base64.b64encode(b"ok").decode(),
+                    status_code=200,
+                )
+                await inbox.put(
+                    {"type": "websocket.receive", "text": resp.model_dump_json()}
+                )
+
+                await asyncio.sleep(0.05)
+                await inbox.put({"type": "websocket.disconnect"})
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(app_task, timeout=2)
+
+            ws_task = asyncio.create_task(ws_client_side())
+            await asyncio.sleep(0.01)
+
+            http_resp = await asyncio.wait_for(
+                client.post(
+                    f"/{connection_id}/upload",
+                    headers={"Authorization": f"Bearer {token}"},
+                    content=binary_body,
+                ),
+                timeout=10,
+            )
+            await ws_task
+
+        assert http_resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Bug #7 — Response body charset-unsafe
+# ---------------------------------------------------------------------------
+
+
+class TestBinaryResponseBody:
+    async def test_binary_response_body_survives_round_trip(
+        self, connection_id: str
+    ) -> None:
+        """
+        A binary response body (e.g. image, protobuf) must be returned intact.
+        With the old response.text + .encode() approach the bytes would be
+        mangled by charset detection.
+        """
+        binary_response = bytes(range(256))
+
+        app = _make_app_with_settings()
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+
+            async def ws_client_side() -> None:
+                scope: dict[str, object] = {
+                    "type": "websocket",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "path": f"/{connection_id}",
+                    "query_string": b"",
+                    "headers": [],
+                }
+                inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+                await inbox.put({"type": "websocket.connect"})
+                app_task = asyncio.create_task(
+                    app(scope, inbox.get, outbox.put),  # type: ignore[arg-type]
+                )
+
+                msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                assert msg["type"] == "websocket.accept"
+
+                msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                assert msg["type"] == "websocket.send"
+                fwd = json.loads(cast(str, msg["text"]))
+
+                # Tunnel client: base64-encode the binary response
+                resp = BufferGateResponse(
+                    correlation_id=fwd["correlation_id"],
+                    headers=orjson.dumps(
+                        {"content-type": "application/octet-stream"}
+                    ).decode(),
+                    body=base64.b64encode(binary_response).decode(),
+                    status_code=200,
+                )
+                await inbox.put(
+                    {"type": "websocket.receive", "text": resp.model_dump_json()}
+                )
+
+                await asyncio.sleep(0.05)
+                await inbox.put({"type": "websocket.disconnect"})
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(app_task, timeout=2)
+
+            ws_task = asyncio.create_task(ws_client_side())
+            await asyncio.sleep(0.01)
+
+            http_resp = await asyncio.wait_for(
+                client.get(
+                    f"/{connection_id}/download",
+                    headers={"Authorization": f"Bearer {token}"},
+                ),
+                timeout=10,
+            )
+            await ws_task
+
+        assert http_resp.status_code == 200
+        assert http_resp.content == binary_response, (
+            "Binary response body was corrupted during transport"
+        )
