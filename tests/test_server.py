@@ -730,3 +730,121 @@ class TestBinaryResponseBody:
         assert http_resp.content == binary_response, (
             "Binary response body was corrupted during transport"
         )
+
+
+# ---------------------------------------------------------------------------
+# Refactor #9 — Replace print() with logging
+# ---------------------------------------------------------------------------
+
+
+class TestLoggingInsteadOfPrint:
+    def test_server_uses_logger_not_print(self) -> None:
+        """
+        server.py must use logger.* instead of bare print() calls.
+        A module-level logger must be defined.
+        """
+        import ast
+        import importlib.util
+        import pathlib
+
+        src = pathlib.Path(importlib.util.find_spec("pipegate.server").origin)  # type: ignore[union-attr]
+        tree = ast.parse(src.read_text())
+
+        print_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "print"
+        ]
+        assert not print_calls, (
+            f"server.py still has {len(print_calls)} bare print() call(s); "
+            "use logger.info/warning/error instead"
+        )
+
+        logger_assignments = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(t, ast.Name) and t.id == "logger"
+                for t in node.targets
+            )
+        ]
+        assert logger_assignments, "server.py must define a module-level `logger`"
+
+
+# ---------------------------------------------------------------------------
+# Refactor #11 — Fail waiting futures immediately on WebSocket disconnect
+# ---------------------------------------------------------------------------
+
+
+class TestInFlightFuturesFailOnDisconnect:
+    async def test_all_inflight_futures_fail_when_ws_disconnects(
+        self, connection_id: str
+    ) -> None:
+        """
+        When the WebSocket client disconnects while multiple HTTP requests are
+        in-flight (queued but not yet forwarded), all their futures must be
+        immediately resolved with an error — not left waiting 300 s each.
+        """
+        app = _make_app_with_settings()
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        ws_connected = asyncio.Event()
+        ready_to_disconnect = asyncio.Event()
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+
+            async def ws_client_disconnects_early() -> None:
+                scope: dict[str, object] = {
+                    "type": "websocket",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "path": f"/{connection_id}",
+                    "query_string": b"",
+                    "headers": [],
+                }
+                inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+                await inbox.put({"type": "websocket.connect"})
+                app_task = asyncio.create_task(
+                    app(scope, inbox.get, outbox.put),  # type: ignore[arg-type]
+                )
+
+                msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                assert msg["type"] == "websocket.accept"
+
+                ws_connected.set()
+
+                await asyncio.wait_for(ready_to_disconnect.wait(), timeout=5)
+                await inbox.put({"type": "websocket.disconnect"})
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(app_task, timeout=3)
+
+            ws_task = asyncio.create_task(ws_client_disconnects_early())
+
+            await asyncio.wait_for(ws_connected.wait(), timeout=5)
+
+            async def make_request(path: str) -> Response:
+                return await client.get(
+                    f"/{connection_id}/{path}",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+            http_task1 = asyncio.create_task(make_request("req1"))
+            http_task2 = asyncio.create_task(make_request("req2"))
+
+            await asyncio.sleep(0.05)
+            ready_to_disconnect.set()
+
+            resp1, resp2 = await asyncio.wait_for(
+                asyncio.gather(http_task1, http_task2),
+                timeout=5,
+            )
+            await ws_task
+
+        assert resp1.status_code in (502, 503), f"req1 expected 502/503, got {resp1.status_code}"
+        assert resp2.status_code in (502, 503), f"req2 expected 502/503, got {resp2.status_code}"
