@@ -4,7 +4,6 @@ import asyncio
 import base64
 import contextlib
 import json
-import uuid
 from typing import cast
 
 import orjson

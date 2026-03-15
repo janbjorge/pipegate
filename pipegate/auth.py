@@ -9,7 +9,7 @@ from .schemas import JWTPayload, Settings
 
 
 def verify_token(token: str, settings: Settings) -> JWTPayload:
-    """Decode and verify a JWT token, returning the payload (including connection ID in ``sub``)."""
+    """Decode and verify a JWT, returning the payload (connection ID in ``sub``)."""
     decoded = jwt.decode(
         token,
         settings.jwt_secret.get_secret_value(),
