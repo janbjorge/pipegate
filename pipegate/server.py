@@ -4,6 +4,7 @@ import asyncio
 import base64
 import collections
 import contextlib
+import logging
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -31,6 +32,8 @@ from .schemas import (
     Methods,
     Settings,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def get_settings(request: Request) -> Settings:
@@ -65,6 +68,9 @@ def create_app() -> FastAPI:
         asyncio.Queue
     )
     futures: dict[uuid.UUID, asyncio.Future[BufferGateResponse]] = {}
+    # Maps connection_id → set of in-flight correlation_ids for that connection.
+    # Used to fail all waiting futures immediately on WebSocket disconnect.  (#11)
+    connection_futures: dict[str, set[uuid.UUID]] = collections.defaultdict(set)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -102,6 +108,7 @@ def create_app() -> FastAPI:
         loop = asyncio.get_event_loop()
         future: asyncio.Future[BufferGateResponse] = loop.create_future()
         futures[correlation_id] = future
+        connection_futures[connection_id].add(correlation_id)  # #11
 
         try:
             await buffers[connection_id].put(
@@ -123,6 +130,7 @@ def create_app() -> FastAPI:
             )
         except Exception as e:
             futures.pop(correlation_id, None)
+            connection_futures[connection_id].discard(correlation_id)
             raise HTTPException(
                 status_code=500, detail=f"Failed to enqueue request: {e}"
             ) from e
@@ -136,6 +144,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=504, detail="Gateway Timeout") from e
         finally:
             futures.pop(correlation_id, None)
+            connection_futures[connection_id].discard(correlation_id)
 
         return Response(
             content=base64.b64decode(response.body) if response.body else b"",  # #7
@@ -149,7 +158,7 @@ def create_app() -> FastAPI:
         websocket: WebSocket,
     ) -> None:
         await websocket.accept()
-        print(f"WebSocket connection established for ID: {connection_id}")
+        logger.info("WebSocket connection established for ID: %s", connection_id)
 
         async def receive() -> None:
             try:
@@ -162,15 +171,15 @@ def create_app() -> FastAPI:
                             future.set_result(message)
                         else:
                             cid = message.correlation_id
-                            print(f"No pending future for: {cid}")
+                            logger.warning("No pending future for: %s", cid)
                     except ValidationError as ve:
-                        print(f"Invalid message format: {ve}")
+                        logger.warning("Invalid message format: %s", ve)
                     except Exception as e:
-                        print(f"Error processing received message: {e}")
+                        logger.error("Error processing received message: %s", e)
             except WebSocketDisconnect as e:
-                print(f"WebSocket disconnected during receive: {e}")
+                logger.info("WebSocket disconnected during receive: %s", e)
             except Exception as e:
-                print(f"Unexpected error in receive handler: {e}")
+                logger.error("Unexpected error in receive handler: %s", e)
 
         async def send() -> None:
             try:
@@ -179,7 +188,7 @@ def create_app() -> FastAPI:
                     try:
                         await websocket.send_text(request.model_dump_json())
                     except WebSocketDisconnect as e:
-                        print(f"WebSocket disconnected during send: {e}")
+                        logger.info("WebSocket disconnected during send: %s", e)
                         # The item was already dequeued; fail its future
                         # immediately so the HTTP caller gets a 502 rather
                         # than waiting for the 300 s timeout.  (#2)
@@ -193,9 +202,9 @@ def create_app() -> FastAPI:
                             )
                         break
                     except Exception as e:
-                        print(f"Error sending message: {e}")
+                        logger.error("Error sending message: %s", e)
             except Exception as e:
-                print(f"Unexpected error in send handler: {e}")
+                logger.error("Unexpected error in send handler: %s", e)
 
         receive_task = asyncio.create_task(receive())
         send_task = asyncio.create_task(send())
@@ -211,7 +220,20 @@ def create_app() -> FastAPI:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
-        print(f"WebSocket connection closed for ID: {connection_id}")
+        logger.info("WebSocket connection closed for ID: %s", connection_id)
+
+        # Fail all in-flight futures for this connection immediately so HTTP
+        # callers get a 503 instead of waiting until the 300 s timeout expires.  (#11)
+        for cid in list(connection_futures.pop(connection_id, set())):
+            fut = futures.get(cid)
+            if fut and not fut.done():
+                fut.set_exception(
+                    HTTPException(
+                        status_code=503,
+                        detail="Tunnel client disconnected",
+                    )
+                )
+
         buffers.pop(connection_id, None)  # #3: clean up queue entry
 
     return app

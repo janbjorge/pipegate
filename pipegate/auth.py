@@ -25,7 +25,7 @@ def verify_token(token: str, connection_id: str, settings: Settings) -> JWTPaylo
 
 def make_jwt_bearer() -> None:
     """CLI helper: generate a connection ID and JWT token."""
-    settings = Settings()
+    settings = Settings(_cli_parse_args=True)  # #10: only here do we want CLI parsing
     connection_id = settings.connection_id or uuid.uuid4().hex
 
     jwt_payload = JWTPayload(
