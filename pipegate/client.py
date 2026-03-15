@@ -70,52 +70,77 @@ async def handle_request(
     await ws_client.send(response_payload.model_dump_json())
 
 
+_BACKOFF_BASE: float = 1.0
+_BACKOFF_MAX: float = 60.0
+
+
 async def main(target_url: str, server_url: str) -> None:
     """
     Establish a WebSocket connection to the server and handle requests.
+    Automatically reconnects with exponential backoff on disconnection.  (#12)
 
     Args:
         target_url (str): The local server to route incoming traffic to.
         server_url (str): The WebSocket server URL to connect to.
     """
-    typer.secho(
-        f"Connecting to server at {server_url}...",
-        fg=typer.colors.BLUE,
-    )
+    attempt = 0
 
-    try:
-        async with connect(server_url) as ws_client, httpx.AsyncClient() as http_client:
-            typer.secho("Connected to server.", fg=typer.colors.GREEN)
-            async with asyncio.TaskGroup() as task_group:
-                while True:
-                    try:
-                        message = await ws_client.recv()
-                        request = BufferGateRequest.model_validate_json(message)
-                        task_group.create_task(
-                            handle_request(
-                                target_url,
-                                request,
-                                http_client,
-                                ws_client,
+    while True:
+        delay = min(_BACKOFF_BASE * (2**attempt), _BACKOFF_MAX)
+
+        if attempt > 0:
+            typer.secho(
+                f"Reconnecting in {delay:.0f}s (attempt {attempt + 1})...",
+                fg=typer.colors.YELLOW,
+            )
+            await asyncio.sleep(delay)
+
+        typer.secho(
+            f"Connecting to server at {server_url}...",
+            fg=typer.colors.BLUE,
+        )
+
+        try:
+            async with (
+                connect(server_url) as ws_client,
+                httpx.AsyncClient() as http_client,
+            ):
+                typer.secho("Connected to server.", fg=typer.colors.GREEN)
+                attempt = 0  # Reset backoff counter on successful connect
+                async with asyncio.TaskGroup() as task_group:
+                    while True:
+                        try:
+                            message = await ws_client.recv()
+                            request = BufferGateRequest.model_validate_json(message)
+                            task_group.create_task(
+                                handle_request(
+                                    target_url,
+                                    request,
+                                    http_client,
+                                    ws_client,
+                                )
                             )
-                        )
-                    except asyncio.CancelledError:
-                        break
-                    except Exception as e:
-                        typer.secho(
-                            f"Error receiving message: {e}",
-                            fg=typer.colors.RED,
-                        )
-    except (ConnectionRefusedError, OSError) as e:
-        typer.secho(
-            f"Failed to connect to the server: {e}",
-            fg=typer.colors.RED,
-        )
-    except Exception as e:
-        typer.secho(
-            f"An unexpected error occurred: {e}",
-            fg=typer.colors.RED,
-        )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            typer.secho(
+                                f"Error receiving message: {e}",
+                                fg=typer.colors.RED,
+                            )
+        except asyncio.CancelledError:
+            raise
+        except (ConnectionRefusedError, OSError) as e:
+            typer.secho(
+                f"Failed to connect to the server: {e}",
+                fg=typer.colors.RED,
+            )
+        except Exception as e:
+            typer.secho(
+                f"An unexpected error occurred: {e}",
+                fg=typer.colors.RED,
+            )
+
+        attempt += 1
 
 
 if __name__ == "__main__":

@@ -64,9 +64,7 @@ def verify_jwt_uuid_match(
 
 
 def create_app() -> FastAPI:
-    buffers: dict[str, asyncio.Queue[BufferGateRequest]] = collections.defaultdict(
-        asyncio.Queue
-    )
+    buffers: dict[str, asyncio.Queue[BufferGateRequest]] = {}  # bounded queues via #15
     futures: dict[uuid.UUID, asyncio.Future[BufferGateResponse]] = {}
     # Maps connection_id → set of in-flight correlation_ids for that connection.
     # Used to fail all waiting futures immediately on WebSocket disconnect.  (#11)
@@ -102,6 +100,15 @@ def create_app() -> FastAPI:
     ) -> Response:
         correlation_id = uuid.uuid4()
 
+        # Enforce body size limit before doing any async work.  (#14)
+        settings: Settings = request.app.extra["settings"]
+        raw_body = await request.body()
+        if len(raw_body) > settings.max_body_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Request body exceeds limit of {settings.max_body_bytes} bytes",
+            )
+
         # Create and store the future BEFORE enqueuing so that the WebSocket
         # receive() handler can always find it via futures.get(), even when
         # the tunnel client responds before this coroutine resumes.  (#1)
@@ -110,8 +117,12 @@ def create_app() -> FastAPI:
         futures[correlation_id] = future
         connection_futures[connection_id].add(correlation_id)  # #11
 
+        # Get or create a bounded queue for this connection.  (#15)
+        if connection_id not in buffers:
+            buffers[connection_id] = asyncio.Queue(maxsize=settings.max_queue_depth)
+
         try:
-            await buffers[connection_id].put(
+            buffers[connection_id].put_nowait(  # #15: raises QueueFull if at capacity
                 BufferGateRequest(
                     correlation_id=correlation_id,
                     method=cast(Methods, request.method),
@@ -125,8 +136,15 @@ def create_app() -> FastAPI:
                             "x-pipegate-correlation-id": correlation_id.hex,
                         }
                     ).decode(),
-                    body=base64.b64encode(await request.body()).decode(),  # #6
+                    body=base64.b64encode(raw_body).decode(),  # #6
                 )
+            )
+        except asyncio.QueueFull:
+            futures.pop(correlation_id, None)
+            connection_futures[connection_id].discard(correlation_id)
+            raise HTTPException(
+                status_code=503,
+                detail="Queue full — tunnel client is too slow or not connected",
             )
         except Exception as e:
             futures.pop(correlation_id, None)
@@ -157,8 +175,26 @@ def create_app() -> FastAPI:
         connection_id: str,
         websocket: WebSocket,
     ) -> None:
+        # Authenticate before accepting — WS clients cannot send custom headers,
+        # so the JWT is passed as the `token` query parameter.  (#13)
+        settings: Settings = websocket.app.extra["settings"]
+        token: str | None = websocket.query_params.get("token")
+        if not token:
+            await websocket.close(code=1008, reason="Missing token")
+            return
+        try:
+            verify_token(token, connection_id, settings)
+        except Exception as exc:
+            logger.warning("WebSocket auth failed for %s: %s", connection_id, exc)
+            await websocket.close(code=1008, reason="Invalid token")
+            return
+
         await websocket.accept()
         logger.info("WebSocket connection established for ID: %s", connection_id)
+
+        # Ensure the queue exists with the correct maxsize for this connection.  (#15)
+        if connection_id not in buffers:
+            buffers[connection_id] = asyncio.Queue(maxsize=settings.max_queue_depth)
 
         async def receive() -> None:
             try:

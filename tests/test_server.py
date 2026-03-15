@@ -74,7 +74,7 @@ async def _ws_roundtrip(
                 "asgi": {"version": "3.0"},
                 "http_version": "1.1",
                 "path": f"/{connection_id}",
-                "query_string": b"",
+                "query_string": f"token={token}".encode(),
                 "headers": [],
             }
 
@@ -335,7 +335,7 @@ class TestRaceConditionFutureBeforeEnqueue:
                     "asgi": {"version": "3.0"},
                     "http_version": "1.1",
                     "path": f"/{connection_id}",
-                    "query_string": b"",
+                    "query_string": f"token={token}".encode(),
                     "headers": [],
                 }
                 inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
@@ -421,7 +421,7 @@ class TestDroppedMessageOnDisconnect:
                     "asgi": {"version": "3.0"},
                     "http_version": "1.1",
                     "path": f"/{connection_id}",
-                    "query_string": b"",
+                    "query_string": f"token={token}".encode(),
                     "headers": [],
                 }
                 inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
@@ -484,13 +484,14 @@ class TestBuffersCleanupOnDisconnect:
         lives forever — one entry per connection_id that ever connected.
         """
         app = _make_app_with_settings()
+        token = make_token(connection_id)
 
         scope: dict[str, object] = {
             "type": "websocket",
             "asgi": {"version": "3.0"},
             "http_version": "1.1",
             "path": f"/{connection_id}",
-            "query_string": b"",
+            "query_string": f"token={token}".encode(),
             "headers": [],
         }
         inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
@@ -593,7 +594,7 @@ class TestBinaryRequestBody:
                     "asgi": {"version": "3.0"},
                     "http_version": "1.1",
                     "path": f"/{connection_id}",
-                    "query_string": b"",
+                    "query_string": f"token={token}".encode(),
                     "headers": [],
                 }
                 inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
@@ -678,7 +679,7 @@ class TestBinaryResponseBody:
                     "asgi": {"version": "3.0"},
                     "http_version": "1.1",
                     "path": f"/{connection_id}",
-                    "query_string": b"",
+                    "query_string": f"token={token}".encode(),
                     "headers": [],
                 }
                 inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
@@ -802,7 +803,7 @@ class TestInFlightFuturesFailOnDisconnect:
                     "asgi": {"version": "3.0"},
                     "http_version": "1.1",
                     "path": f"/{connection_id}",
-                    "query_string": b"",
+                    "query_string": f"token={token}".encode(),
                     "headers": [],
                 }
                 inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
@@ -850,4 +851,132 @@ class TestInFlightFuturesFailOnDisconnect:
         )
         assert resp2.status_code in (502, 503), (
             f"req2 expected 502/503, got {resp2.status_code}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Feature #13 — WebSocket authentication
+# ---------------------------------------------------------------------------
+
+
+class TestWebSocketAuthentication:
+    async def _connect_ws(
+        self,
+        app: FastAPI,
+        connection_id: str,
+        *,
+        token: str | None = None,
+    ) -> str:
+        """Attempt a WS connection, return the first server message type."""
+        query = f"token={token}" if token else ""
+        scope: dict[str, object] = {
+            "type": "websocket",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "path": f"/{connection_id}",
+            "query_string": query.encode(),
+            "headers": [],
+        }
+        inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        await inbox.put({"type": "websocket.connect"})
+        app_task = asyncio.create_task(
+            app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+        )
+        msg = await asyncio.wait_for(outbox.get(), timeout=3)
+        await inbox.put({"type": "websocket.disconnect"})
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(app_task, timeout=2)
+        return cast(str, msg["type"])
+
+    async def test_ws_rejected_without_token(self, connection_id: str) -> None:
+        """WebSocket connections without a token must be rejected."""
+        app = _make_app_with_settings()
+        assert await self._connect_ws(app, connection_id) == "websocket.close"
+
+    async def test_ws_rejected_with_wrong_token(self, connection_id: str) -> None:
+        """Tokens for a different connection_id must be rejected."""
+        app = _make_app_with_settings()
+        wrong_token = make_token(uuid.uuid4().hex)
+        result = await self._connect_ws(app, connection_id, token=wrong_token)
+        assert result == "websocket.close"
+
+    async def test_ws_rejected_with_expired_token(self, connection_id: str) -> None:
+        """Expired tokens must be rejected."""
+        from datetime import timedelta as _td
+
+        app = _make_app_with_settings()
+        expired = make_token(connection_id, expires_in=_td(seconds=-1))
+        result = await self._connect_ws(app, connection_id, token=expired)
+        assert result == "websocket.close"
+
+    async def test_ws_accepted_with_valid_token(self, connection_id: str) -> None:
+        """Valid tokens must be accepted."""
+        app = _make_app_with_settings()
+        valid_token = make_token(connection_id)
+        result = await self._connect_ws(app, connection_id, token=valid_token)
+        assert result == "websocket.accept"
+
+
+# ---------------------------------------------------------------------------
+# Feature #14 — Configurable request/response size limit
+# ---------------------------------------------------------------------------
+
+
+class TestBodySizeLimit:
+    async def test_oversized_request_body_rejected_with_413(
+        self, connection_id: str
+    ) -> None:
+        """A request body larger than max_body_bytes must return 413."""
+        app = _make_app_with_settings()
+        app.extra["settings"].max_body_bytes = 10
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                f"/{connection_id}/upload",
+                headers={"Authorization": f"Bearer {token}"},
+                content=b"x" * 100,
+            )
+
+        assert resp.status_code == 413, (
+            f"Expected 413 for oversized body, got {resp.status_code}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Feature #15 — Per-connection queue backpressure
+# ---------------------------------------------------------------------------
+
+
+class TestQueueBackpressure:
+    async def test_503_when_queue_is_full(self, connection_id: str) -> None:
+        """When the queue is full, new requests must get 503 immediately."""
+        app = create_app()
+        settings = Settings(_cli_parse_args=False)
+        settings.max_queue_depth = 1
+        app.extra["settings"] = settings
+
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+        second_resp: Response | None = None
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            headers = {"Authorization": f"Bearer {token}"}
+            first_task = asyncio.create_task(
+                client.post(f"/{connection_id}/req1", headers=headers, content=b"a")
+            )
+            await asyncio.sleep(0.05)
+            second_resp = await asyncio.wait_for(
+                client.post(f"/{connection_id}/req2", headers=headers, content=b"b"),
+                timeout=2,
+            )
+            first_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await first_task
+
+        assert second_resp is not None
+        assert second_resp.status_code == 503, (
+            f"Expected 503 when queue is full, got {second_resp.status_code}"
         )
