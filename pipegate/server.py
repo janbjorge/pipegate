@@ -14,7 +14,6 @@ from typing import cast, get_args
 import orjson
 import uvicorn
 from fastapi import (
-    Depends,
     FastAPI,
     HTTPException,
     Request,
@@ -28,39 +27,11 @@ from .auth import verify_token
 from .schemas import (
     BufferGateRequest,
     BufferGateResponse,
-    JWTPayload,
     Methods,
     Settings,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def get_settings(request: Request) -> Settings:
-    settings: Settings = request.app.extra["settings"]
-    return settings
-
-
-def verify_jwt_uuid_match(
-    connection_id: str,
-    request: Request,
-    settings: Settings = Depends(get_settings),  # noqa: B008
-) -> JWTPayload:
-    authorization: str | None = request.headers.get("Authorization")
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401,
-            detail="Missing or invalid Authorization header",
-        )
-
-    token = authorization.split(" ", 1)[1]
-
-    try:
-        return verify_token(token, connection_id, settings)
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=str(e)) from e
 
 
 def create_app() -> FastAPI:
@@ -100,7 +71,6 @@ def create_app() -> FastAPI:
         connection_id: str,
         request: Request,
         path_slug: str = "",
-        payload: JWTPayload = Depends(verify_jwt_uuid_match),  # noqa: B008
     ) -> Response:
         correlation_id = uuid.uuid4()
 

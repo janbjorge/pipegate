@@ -5,7 +5,6 @@ import base64
 import contextlib
 import json
 import uuid
-from datetime import timedelta
 from typing import cast
 
 import orjson
@@ -64,7 +63,6 @@ async def _ws_roundtrip(
             return await client.request(
                 method,
                 url,
-                headers={"Authorization": f"Bearer {token}"},
                 content=body,
             )
 
@@ -132,55 +130,6 @@ async def _ws_roundtrip(
         resp = await asyncio.wait_for(http_task, timeout=10)
 
     return resp, forwarded_request
-
-
-# ---------------------------------------------------------------------------
-# Auth tests (HTTP endpoint)
-# ---------------------------------------------------------------------------
-
-
-class TestHTTPAuth:
-    async def test_no_auth_header(
-        self, client: AsyncClient, connection_id: str
-    ) -> None:
-        resp = await client.get(f"/{connection_id}/ping")
-        assert resp.status_code == 401
-
-    async def test_bad_auth_scheme(
-        self, client: AsyncClient, connection_id: str
-    ) -> None:
-        resp = await client.get(
-            f"/{connection_id}/ping",
-            headers={"Authorization": "Basic abc"},
-        )
-        assert resp.status_code == 401
-
-    async def test_expired_token(self, client: AsyncClient, connection_id: str) -> None:
-        token = make_token(connection_id, expires_in=timedelta(seconds=-1))
-        resp = await client.get(
-            f"/{connection_id}/ping",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        assert resp.status_code == 401
-
-    async def test_wrong_connection_id(self, client: AsyncClient) -> None:
-        cid_a = uuid.uuid4().hex
-        cid_b = uuid.uuid4().hex
-        token = make_token(cid_a)
-        resp = await client.get(
-            f"/{cid_b}/ping",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        assert resp.status_code == 403
-
-    async def test_malformed_token(
-        self, client: AsyncClient, connection_id: str
-    ) -> None:
-        resp = await client.get(
-            f"/{connection_id}/ping",
-            headers={"Authorization": "Bearer garbage"},
-        )
-        assert resp.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -374,10 +323,7 @@ class TestRaceConditionFutureBeforeEnqueue:
             await asyncio.sleep(0.01)
 
             http_resp = await asyncio.wait_for(
-                client.get(
-                    f"/{connection_id}/ping",
-                    headers={"Authorization": f"Bearer {token}"},
-                ),
+                client.get(f"/{connection_id}/ping"),
                 timeout=10,
             )
 
@@ -454,10 +400,7 @@ class TestDroppedMessageOnDisconnect:
 
             # The HTTP request should fail quickly (5 s), not wait 300 s
             http_resp = await asyncio.wait_for(
-                client.get(
-                    f"/{connection_id}/ping",
-                    headers={"Authorization": f"Bearer {token}"},
-                ),
+                client.get(f"/{connection_id}/ping"),
                 timeout=5,
             )
 
@@ -641,7 +584,6 @@ class TestBinaryRequestBody:
             http_resp = await asyncio.wait_for(
                 client.post(
                     f"/{connection_id}/upload",
-                    headers={"Authorization": f"Bearer {token}"},
                     content=binary_body,
                 ),
                 timeout=10,
@@ -719,10 +661,7 @@ class TestBinaryResponseBody:
             await asyncio.sleep(0.01)
 
             http_resp = await asyncio.wait_for(
-                client.get(
-                    f"/{connection_id}/download",
-                    headers={"Authorization": f"Bearer {token}"},
-                ),
+                client.get(f"/{connection_id}/download"),
                 timeout=10,
             )
             await ws_task
@@ -829,10 +768,7 @@ class TestInFlightFuturesFailOnDisconnect:
             await asyncio.wait_for(ws_connected.wait(), timeout=5)
 
             async def make_request(path: str) -> Response:
-                return await client.get(
-                    f"/{connection_id}/{path}",
-                    headers={"Authorization": f"Bearer {token}"},
-                )
+                return await client.get(f"/{connection_id}/{path}")
 
             http_task1 = asyncio.create_task(make_request("req1"))
             http_task2 = asyncio.create_task(make_request("req2"))
@@ -930,13 +866,11 @@ class TestBodySizeLimit:
         """A request body larger than max_body_bytes must return 413."""
         app = _make_app_with_settings()
         app.extra["settings"].max_body_bytes = 10
-        token = make_token(connection_id)
         transport = ASGITransport(app=app)
 
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post(
                 f"/{connection_id}/upload",
-                headers={"Authorization": f"Bearer {token}"},
                 content=b"x" * 100,
             )
 
@@ -958,18 +892,16 @@ class TestQueueBackpressure:
         settings.max_queue_depth = 1
         app.extra["settings"] = settings
 
-        token = make_token(connection_id)
         transport = ASGITransport(app=app)
         second_resp: Response | None = None
 
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            headers = {"Authorization": f"Bearer {token}"}
             first_task = asyncio.create_task(
-                client.post(f"/{connection_id}/req1", headers=headers, content=b"a")
+                client.post(f"/{connection_id}/req1", content=b"a")
             )
             await asyncio.sleep(0.05)
             second_resp = await asyncio.wait_for(
-                client.post(f"/{connection_id}/req2", headers=headers, content=b"b"),
+                client.post(f"/{connection_id}/req2", content=b"b"),
                 timeout=2,
             )
             first_task.cancel()
@@ -1035,10 +967,7 @@ class TestHeadRequestBodyStripped:
             ws_task = asyncio.create_task(ws_client_side())
             await asyncio.sleep(0.01)
             http_resp = await asyncio.wait_for(
-                client.head(
-                    f"/{connection_id}/resource",
-                    headers={"Authorization": f"Bearer {token}"},
-                ),
+                client.head(f"/{connection_id}/resource"),
                 timeout=10,
             )
             await ws_task
