@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.util
 import uuid
 from unittest.mock import AsyncMock, patch
 
@@ -65,12 +66,15 @@ class TestHandleRequest:
         resp = BufferGateResponse.model_validate_json(sent_json)
         assert resp.correlation_id == sample_request.correlation_id
         assert resp.status_code == 200
+        # body is base64-encoded for binary-safe transport
         assert base64.b64decode(resp.body) == b"ok"
         resp_headers = orjson.loads(resp.headers)
         assert resp_headers["x-resp"] == "val"
 
     async def test_preserves_method_and_body(
-        self, correlation_id: uuid.UUID, ws_client: AsyncMock
+        self,
+        correlation_id: uuid.UUID,
+        ws_client: AsyncMock,
     ) -> None:
         """POST body and method are forwarded correctly."""
         request = BufferGateRequest(
@@ -81,6 +85,7 @@ class TestHandleRequest:
             headers=orjson.dumps({}).decode(),
             body=base64.b64encode(b"payload-data").decode(),
         )
+
         captured: dict[str, object] = {}
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -94,6 +99,7 @@ class TestHandleRequest:
             await handle_request(
                 "http://localhost:9000", request, http_client, ws_client
             )
+
         assert captured["method"] == "POST"
         assert captured["content"] == "payload-data"
         sent_json: str = ws_client.send.call_args[0][0]
@@ -101,7 +107,9 @@ class TestHandleRequest:
         assert resp.status_code == 201
 
     async def test_preserves_url_path(
-        self, correlation_id: uuid.UUID, ws_client: AsyncMock
+        self,
+        correlation_id: uuid.UUID,
+        ws_client: AsyncMock,
     ) -> None:
         """Target URL is constructed from target + url_path."""
         request = BufferGateRequest(
@@ -112,6 +120,7 @@ class TestHandleRequest:
             headers=orjson.dumps({}).decode(),
             body="",
         )
+
         captured_url: list[str] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -124,10 +133,13 @@ class TestHandleRequest:
             await handle_request(
                 "http://localhost:9000", request, http_client, ws_client
             )
+
         assert "localhost:9000/nested/path/here" in captured_url[0]
 
     async def test_preserves_query_params(
-        self, correlation_id: uuid.UUID, ws_client: AsyncMock
+        self,
+        correlation_id: uuid.UUID,
+        ws_client: AsyncMock,
     ) -> None:
         """Query parameters are forwarded to the target."""
         request = BufferGateRequest(
@@ -138,6 +150,7 @@ class TestHandleRequest:
             headers=orjson.dumps({}).decode(),
             body="",
         )
+
         captured_params: dict[str, str] = {}
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -150,11 +163,14 @@ class TestHandleRequest:
             await handle_request(
                 "http://localhost:9000", request, http_client, ws_client
             )
+
         assert captured_params["q"] == "test"
         assert captured_params["page"] == "1"
 
     async def test_preserves_duplicate_query_params(
-        self, correlation_id: uuid.UUID, ws_client: AsyncMock
+        self,
+        correlation_id: uuid.UUID,
+        ws_client: AsyncMock,
     ) -> None:
         """Duplicate query parameters (?a=1&a=2) must both reach the target."""
         request = BufferGateRequest(
@@ -165,6 +181,7 @@ class TestHandleRequest:
             headers=orjson.dumps({}).decode(),
             body="",
         )
+
         captured_url: list[httpx.URL] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -177,12 +194,17 @@ class TestHandleRequest:
             await handle_request(
                 "http://localhost:9000", request, http_client, ws_client
             )
-        assert captured_url
+
+        assert captured_url, "Handler was never called"
         a_values = captured_url[0].params.get_list("a")
-        assert sorted(a_values) == ["1", "2"]
+        assert sorted(a_values) == ["1", "2"], (
+            f"Both 'a' values must be forwarded, got {a_values}"
+        )
 
     async def test_preserves_headers(
-        self, correlation_id: uuid.UUID, ws_client: AsyncMock
+        self,
+        correlation_id: uuid.UUID,
+        ws_client: AsyncMock,
     ) -> None:
         """Custom headers are forwarded to the target."""
         request = BufferGateRequest(
@@ -195,6 +217,7 @@ class TestHandleRequest:
             ).decode(),
             body="",
         )
+
         captured_headers: dict[str, str] = {}
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -207,14 +230,18 @@ class TestHandleRequest:
             await handle_request(
                 "http://localhost:9000", request, http_client, ws_client
             )
+
         assert captured_headers["x-custom"] == "value"
         assert captured_headers["accept"] == "application/json"
 
     async def test_binary_body_forwarded_correctly(
-        self, correlation_id: uuid.UUID, ws_client: AsyncMock
+        self,
+        correlation_id: uuid.UUID,
+        ws_client: AsyncMock,
     ) -> None:
         """Binary (non-UTF-8) request bodies must be forwarded without corruption."""
         binary_body = bytes(range(256))
+
         request = BufferGateRequest(
             correlation_id=correlation_id,
             url_path="upload",
@@ -223,6 +250,7 @@ class TestHandleRequest:
             headers=orjson.dumps({}).decode(),
             body=base64.b64encode(binary_body).decode(),
         )
+
         captured_content: list[bytes] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -235,13 +263,20 @@ class TestHandleRequest:
             await handle_request(
                 "http://localhost:9000", request, http_client, ws_client
             )
-        assert captured_content[0] == binary_body
+
+        assert captured_content[0] == binary_body, (
+            "Binary body was not forwarded correctly to the target"
+        )
         sent_json: str = ws_client.send.call_args[0][0]
         resp = BufferGateResponse.model_validate_json(sent_json)
-        assert base64.b64decode(resp.body) == binary_body
+        assert base64.b64decode(resp.body) == binary_body, (
+            "Binary response body was corrupted"
+        )
 
     async def test_http_error_returns_504(
-        self, sample_request: BufferGateRequest, ws_client: AsyncMock
+        self,
+        sample_request: BufferGateRequest,
+        ws_client: AsyncMock,
     ) -> None:
         """When the target raises an exception, a 504 response is sent."""
 
@@ -254,6 +289,7 @@ class TestHandleRequest:
             await handle_request(
                 "http://localhost:9000", sample_request, http_client, ws_client
             )
+
         ws_client.send.assert_called_once()
         sent_json: str = ws_client.send.call_args[0][0]
         resp = BufferGateResponse.model_validate_json(sent_json)
@@ -263,7 +299,9 @@ class TestHandleRequest:
         assert resp.headers == ""
 
     async def test_target_timeout_returns_504(
-        self, sample_request: BufferGateRequest, ws_client: AsyncMock
+        self,
+        sample_request: BufferGateRequest,
+        ws_client: AsyncMock,
     ) -> None:
         """When the target times out, a 504 response is sent."""
 
@@ -276,6 +314,7 @@ class TestHandleRequest:
             await handle_request(
                 "http://localhost:9000", sample_request, http_client, ws_client
             )
+
         sent_json: str = ws_client.send.call_args[0][0]
         resp = BufferGateResponse.model_validate_json(sent_json)
         assert resp.status_code == 504
@@ -288,7 +327,8 @@ class TestHandleRequest:
 
 class TestMain:
     async def test_receives_and_processes_request(
-        self, sample_request: BufferGateRequest
+        self,
+        sample_request: BufferGateRequest,
     ) -> None:
         """main() connects via WS, receives a request, forwards it."""
         import contextlib
@@ -364,8 +404,6 @@ class TestCLI:
 
     def test_module_runnable(self) -> None:
         """client module has __name__ == '__main__' guard."""
-        import importlib.util
-
         source = importlib.util.find_spec("pipegate.client")
         assert source is not None
         assert source.origin is not None

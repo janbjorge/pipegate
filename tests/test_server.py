@@ -747,7 +747,9 @@ class TestLoggingInsteadOfPrint:
         import importlib.util
         import pathlib
 
-        src = pathlib.Path(importlib.util.find_spec("pipegate.server").origin)  # type: ignore[union-attr]
+        spec = importlib.util.find_spec("pipegate.server")
+        assert spec is not None and spec.origin is not None
+        src = pathlib.Path(spec.origin)
         tree = ast.parse(src.read_text())
 
         print_calls = [
@@ -766,10 +768,7 @@ class TestLoggingInsteadOfPrint:
             node
             for node in ast.walk(tree)
             if isinstance(node, ast.Assign)
-            and any(
-                isinstance(t, ast.Name) and t.id == "logger"
-                for t in node.targets
-            )
+            and any(isinstance(t, ast.Name) and t.id == "logger" for t in node.targets)
         ]
         assert logger_assignments, "server.py must define a module-level `logger`"
 
@@ -846,5 +845,9 @@ class TestInFlightFuturesFailOnDisconnect:
             )
             await ws_task
 
-        assert resp1.status_code in (502, 503), f"req1 expected 502/503, got {resp1.status_code}"
-        assert resp2.status_code in (502, 503), f"req2 expected 502/503, got {resp2.status_code}"
+        assert resp1.status_code in (502, 503), (
+            f"req1 expected 502/503, got {resp1.status_code}"
+        )
+        assert resp2.status_code in (502, 503), (
+            f"req2 expected 502/503, got {resp2.status_code}"
+        )

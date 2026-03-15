@@ -11,8 +11,6 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import cast, get_args
 
-logger = logging.getLogger(__name__)
-
 import orjson
 import uvicorn
 from fastapi import (
@@ -34,6 +32,8 @@ from .schemas import (
     Methods,
     Settings,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def get_settings(request: Request) -> Settings:
