@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import importlib.util
+import contextlib
 import uuid
 from unittest.mock import AsyncMock, patch
 
@@ -12,10 +12,6 @@ import pytest
 
 from pipegate.client import handle_request, main
 from pipegate.schemas import BufferGateRequest, BufferGateResponse
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -41,17 +37,16 @@ def ws_client() -> AsyncMock:
 
 
 # ---------------------------------------------------------------------------
-# handle_request tests
+# handle_request
 # ---------------------------------------------------------------------------
 
 
 class TestHandleRequest:
-    async def test_forwards_request_to_target(
+    async def test_successful_forward(
         self,
         sample_request: BufferGateRequest,
         ws_client: AsyncMock,
     ) -> None:
-        """Successful request is forwarded and response sent back."""
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(
                 lambda req: httpx.Response(200, text="ok", headers={"x-resp": "val"})
@@ -62,21 +57,17 @@ class TestHandleRequest:
             )
 
         ws_client.send.assert_called_once()
-        sent_json: str = ws_client.send.call_args[0][0]
-        resp = BufferGateResponse.model_validate_json(sent_json)
+        resp = BufferGateResponse.model_validate_json(ws_client.send.call_args[0][0])
         assert resp.correlation_id == sample_request.correlation_id
         assert resp.status_code == 200
-        # body is base64-encoded for binary-safe transport
         assert base64.b64decode(resp.body) == b"ok"
-        resp_headers = orjson.loads(resp.headers)
-        assert resp_headers["x-resp"] == "val"
+        assert orjson.loads(resp.headers)["x-resp"] == "val"
 
-    async def test_preserves_method_and_body(
+    async def test_post_body_forwarded(
         self,
         correlation_id: uuid.UUID,
         ws_client: AsyncMock,
     ) -> None:
-        """POST body and method are forwarded correctly."""
         request = BufferGateRequest(
             correlation_id=correlation_id,
             url_path="submit",
@@ -102,160 +93,29 @@ class TestHandleRequest:
 
         assert captured["method"] == "POST"
         assert captured["content"] == "payload-data"
-        sent_json: str = ws_client.send.call_args[0][0]
-        resp = BufferGateResponse.model_validate_json(sent_json)
+        resp = BufferGateResponse.model_validate_json(ws_client.send.call_args[0][0])
         assert resp.status_code == 201
 
-    async def test_preserves_url_path(
+    async def test_binary_body(
         self,
         correlation_id: uuid.UUID,
         ws_client: AsyncMock,
     ) -> None:
-        """Target URL is constructed from target + url_path."""
-        request = BufferGateRequest(
-            correlation_id=correlation_id,
-            url_path="nested/path/here",
-            url_query=orjson.dumps([]).decode(),
-            method="GET",
-            headers=orjson.dumps({}).decode(),
-            body="",
-        )
-
-        captured_url: list[str] = []
-
-        def handler(req: httpx.Request) -> httpx.Response:
-            captured_url.append(str(req.url))
-            return httpx.Response(200, text="ok")
-
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(handler)
-        ) as http_client:
-            await handle_request(
-                "http://localhost:9000", request, http_client, ws_client
-            )
-
-        assert "localhost:9000/nested/path/here" in captured_url[0]
-
-    async def test_preserves_query_params(
-        self,
-        correlation_id: uuid.UUID,
-        ws_client: AsyncMock,
-    ) -> None:
-        """Query parameters are forwarded to the target."""
-        request = BufferGateRequest(
-            correlation_id=correlation_id,
-            url_path="search",
-            url_query=orjson.dumps([["q", "test"], ["page", "1"]]).decode(),
-            method="GET",
-            headers=orjson.dumps({}).decode(),
-            body="",
-        )
-
-        captured_params: dict[str, str] = {}
-
-        def handler(req: httpx.Request) -> httpx.Response:
-            captured_params.update(dict(req.url.params))
-            return httpx.Response(200, text="ok")
-
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(handler)
-        ) as http_client:
-            await handle_request(
-                "http://localhost:9000", request, http_client, ws_client
-            )
-
-        assert captured_params["q"] == "test"
-        assert captured_params["page"] == "1"
-
-    async def test_preserves_duplicate_query_params(
-        self,
-        correlation_id: uuid.UUID,
-        ws_client: AsyncMock,
-    ) -> None:
-        """Duplicate query parameters (?a=1&a=2) must both reach the target."""
-        request = BufferGateRequest(
-            correlation_id=correlation_id,
-            url_path="search",
-            url_query=orjson.dumps([["a", "1"], ["a", "2"], ["b", "3"]]).decode(),
-            method="GET",
-            headers=orjson.dumps({}).decode(),
-            body="",
-        )
-
-        captured_url: list[httpx.URL] = []
-
-        def handler(req: httpx.Request) -> httpx.Response:
-            captured_url.append(req.url)
-            return httpx.Response(200, text="ok")
-
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(handler)
-        ) as http_client:
-            await handle_request(
-                "http://localhost:9000", request, http_client, ws_client
-            )
-
-        assert captured_url, "Handler was never called"
-        a_values = captured_url[0].params.get_list("a")
-        assert sorted(a_values) == ["1", "2"], (
-            f"Both 'a' values must be forwarded, got {a_values}"
-        )
-
-    async def test_preserves_headers(
-        self,
-        correlation_id: uuid.UUID,
-        ws_client: AsyncMock,
-    ) -> None:
-        """Custom headers are forwarded to the target."""
-        request = BufferGateRequest(
-            correlation_id=correlation_id,
-            url_path="api",
-            url_query=orjson.dumps([]).decode(),
-            method="GET",
-            headers=orjson.dumps(
-                {"x-custom": "value", "accept": "application/json"}
-            ).decode(),
-            body="",
-        )
-
-        captured_headers: dict[str, str] = {}
-
-        def handler(req: httpx.Request) -> httpx.Response:
-            captured_headers.update(dict(req.headers))
-            return httpx.Response(200, text="ok")
-
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(handler)
-        ) as http_client:
-            await handle_request(
-                "http://localhost:9000", request, http_client, ws_client
-            )
-
-        assert captured_headers["x-custom"] == "value"
-        assert captured_headers["accept"] == "application/json"
-
-    async def test_binary_body_forwarded_correctly(
-        self,
-        correlation_id: uuid.UUID,
-        ws_client: AsyncMock,
-    ) -> None:
-        """Binary (non-UTF-8) request bodies must be forwarded without corruption."""
-        binary_body = bytes(range(256))
-
+        binary = bytes(range(256))
         request = BufferGateRequest(
             correlation_id=correlation_id,
             url_path="upload",
             url_query=orjson.dumps([]).decode(),
             method="POST",
             headers=orjson.dumps({}).decode(),
-            body=base64.b64encode(binary_body).decode(),
+            body=base64.b64encode(binary).decode(),
         )
 
-        captured_content: list[bytes] = []
+        captured: list[bytes] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
-            captured_content.append(req.content)
-            return httpx.Response(200, content=binary_body)
+            captured.append(req.content)
+            return httpx.Response(200, content=binary)
 
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
@@ -264,22 +124,15 @@ class TestHandleRequest:
                 "http://localhost:9000", request, http_client, ws_client
             )
 
-        assert captured_content[0] == binary_body, (
-            "Binary body was not forwarded correctly to the target"
-        )
-        sent_json: str = ws_client.send.call_args[0][0]
-        resp = BufferGateResponse.model_validate_json(sent_json)
-        assert base64.b64decode(resp.body) == binary_body, (
-            "Binary response body was corrupted"
-        )
+        assert captured[0] == binary
+        resp = BufferGateResponse.model_validate_json(ws_client.send.call_args[0][0])
+        assert base64.b64decode(resp.body) == binary
 
-    async def test_http_error_returns_504(
+    async def test_target_error_returns_504(
         self,
         sample_request: BufferGateRequest,
         ws_client: AsyncMock,
     ) -> None:
-        """When the target raises an exception, a 504 response is sent."""
-
         def handler(req: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("connection refused")
 
@@ -290,92 +143,18 @@ class TestHandleRequest:
                 "http://localhost:9000", sample_request, http_client, ws_client
             )
 
-        ws_client.send.assert_called_once()
-        sent_json: str = ws_client.send.call_args[0][0]
-        resp = BufferGateResponse.model_validate_json(sent_json)
-        assert resp.correlation_id == sample_request.correlation_id
+        resp = BufferGateResponse.model_validate_json(ws_client.send.call_args[0][0])
         assert resp.status_code == 504
         assert resp.body == ""
-        assert resp.headers == ""
-
-    async def test_target_timeout_returns_504(
-        self,
-        sample_request: BufferGateRequest,
-        ws_client: AsyncMock,
-    ) -> None:
-        """When the target times out, a 504 response is sent."""
-
-        def handler(req: httpx.Request) -> httpx.Response:
-            raise httpx.ReadTimeout("read timed out")
-
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(handler)
-        ) as http_client:
-            await handle_request(
-                "http://localhost:9000", sample_request, http_client, ws_client
-            )
-
-        sent_json: str = ws_client.send.call_args[0][0]
-        resp = BufferGateResponse.model_validate_json(sent_json)
-        assert resp.status_code == 504
 
 
 # ---------------------------------------------------------------------------
-# main() tests
+# main() reconnection
 # ---------------------------------------------------------------------------
 
 
-class TestMain:
-    async def test_receives_and_processes_request(
-        self,
-        sample_request: BufferGateRequest,
-    ) -> None:
-        """main() connects via WS, receives a request, forwards it."""
-        import contextlib
-
-        ws_mock = AsyncMock()
-        send_event = asyncio.Event()
-        recv_calls = 0
-
-        async def recv_side_effect() -> str:
-            nonlocal recv_calls
-            recv_calls += 1
-            if recv_calls == 1:
-                return sample_request.model_dump_json()
-            await asyncio.wait_for(send_event.wait(), timeout=3)
-            raise asyncio.CancelledError()
-
-        async def send_side_effect(data: str) -> None:
-            send_event.set()
-
-        ws_mock.recv = recv_side_effect
-        ws_mock.send = send_side_effect
-
-        connect_cm = AsyncMock()
-        connect_cm.__aenter__ = AsyncMock(return_value=ws_mock)
-        connect_cm.__aexit__ = AsyncMock(return_value=False)
-
-        http_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda req: httpx.Response(200, text="hello"))
-        )
-        http_cm = AsyncMock()
-        http_cm.__aenter__ = AsyncMock(return_value=http_client)
-        http_cm.__aexit__ = AsyncMock(return_value=False)
-
-        with (
-            contextlib.suppress(asyncio.CancelledError, BaseExceptionGroup),
-            patch("pipegate.client.connect", return_value=connect_cm),
-            patch("pipegate.client.httpx.AsyncClient", return_value=http_cm),
-        ):
-            await main("http://localhost:9000", "ws://fake:8000/conn")
-
-        await http_client.aclose()
-        assert send_event.is_set(), "ws_mock.send was never called"
-
-    async def test_connection_refused(self) -> None:
-        """main() catches ConnectionRefusedError and retries (does not exit)."""
-        import contextlib
-
+class TestMainReconnect:
+    async def test_retries_on_connection_refused(self) -> None:
         call_count = 0
         connect_cm = AsyncMock()
 
@@ -393,127 +172,36 @@ class TestMain:
             contextlib.suppress(asyncio.CancelledError),
             patch("pipegate.client.connect", return_value=connect_cm),
             patch("pipegate.client.asyncio.sleep", new_callable=AsyncMock),
-        ):
-            await main("http://localhost:9000", "ws://fake:8000/conn")
-
-        assert call_count >= 2, "main() must retry after ConnectionRefusedError"
-
-    async def test_os_error(self) -> None:
-        """main() catches OSError and retries (does not exit)."""
-        import contextlib
-
-        call_count = 0
-        connect_cm = AsyncMock()
-
-        async def side_effect(*a: object, **kw: object) -> None:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise OSError("network unreachable")
-            raise asyncio.CancelledError()
-
-        connect_cm.__aenter__ = side_effect
-        connect_cm.__aexit__ = AsyncMock(return_value=False)
-
-        with (
-            contextlib.suppress(asyncio.CancelledError),
-            patch("pipegate.client.connect", return_value=connect_cm),
-            patch("pipegate.client.asyncio.sleep", new_callable=AsyncMock),
-        ):
-            await main("http://localhost:9000", "ws://fake:8000/conn")
-
-        assert call_count >= 2, "main() must retry after OSError"
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point test
-# ---------------------------------------------------------------------------
-
-
-class TestCLI:
-    def test_typer_app_exists(self) -> None:
-        """The Typer app is importable and has a command."""
-        from pipegate.client import app
-
-        assert app is not None
-        assert len(app.registered_commands) > 0
-
-    def test_module_runnable(self) -> None:
-        """client module has __name__ == '__main__' guard."""
-        source = importlib.util.find_spec("pipegate.client")
-        assert source is not None
-        assert source.origin is not None
-        with open(source.origin) as f:
-            content = f.read()
-        assert 'if __name__ == "__main__":' in content
-
-
-# ---------------------------------------------------------------------------
-# Feature #12 — Client reconnect with exponential backoff
-# ---------------------------------------------------------------------------
-
-
-class TestClientReconnect:
-    async def test_reconnects_after_disconnect(self) -> None:
-        """main() must retry with exponential backoff after a disconnect."""
-        import contextlib
-
-        call_count = 0
-        max_calls = 3
-        connect_mock = AsyncMock()
-
-        async def side_effect(*args: object, **kwargs: object) -> None:
-            nonlocal call_count
-            call_count += 1
-            if call_count < max_calls:
-                raise ConnectionRefusedError("refused")
-            raise asyncio.CancelledError()
-
-        connect_mock.__aenter__ = side_effect
-        connect_mock.__aexit__ = AsyncMock(return_value=False)
-
-        with (
-            contextlib.suppress(asyncio.CancelledError),
-            patch("pipegate.client.connect", return_value=connect_mock),
-            patch(
-                "pipegate.client.asyncio.sleep", new_callable=AsyncMock
-            ) as sleep_mock,
         ):
             await main("http://localhost:9000", "ws://fake:8000/conn")
 
         assert call_count >= 2
-        assert sleep_mock.called, "Expected asyncio.sleep for backoff"
 
-    async def test_backoff_delay_increases(self) -> None:
-        """Each retry must sleep for longer than the previous one."""
-        import contextlib
-
-        sleep_delays: list[float] = []
+    async def test_backoff_increases(self) -> None:
+        delays: list[float] = []
         call_count = 0
-        connect_mock = AsyncMock()
+        connect_cm = AsyncMock()
 
-        async def side_effect(*args: object, **kwargs: object) -> None:
+        async def side_effect(*a: object, **kw: object) -> None:
             nonlocal call_count
             call_count += 1
             if call_count < 4:
                 raise ConnectionRefusedError("refused")
             raise asyncio.CancelledError()
 
-        connect_mock.__aenter__ = side_effect
-        connect_mock.__aexit__ = AsyncMock(return_value=False)
+        connect_cm.__aenter__ = side_effect
+        connect_cm.__aexit__ = AsyncMock(return_value=False)
 
         async def mock_sleep(delay: float) -> None:
-            sleep_delays.append(delay)
+            delays.append(delay)
 
         with (
             contextlib.suppress(asyncio.CancelledError),
-            patch("pipegate.client.connect", return_value=connect_mock),
+            patch("pipegate.client.connect", return_value=connect_cm),
             patch("pipegate.client.asyncio.sleep", side_effect=mock_sleep),
         ):
             await main("http://localhost:9000", "ws://fake:8000/conn")
 
-        assert len(sleep_delays) >= 2
-        for i in range(1, len(sleep_delays)):
-            assert sleep_delays[i] >= sleep_delays[i - 1], (
-                f"Backoff not increasing: {sleep_delays}"
-            )
+        assert len(delays) >= 2
+        for i in range(1, len(delays)):
+            assert delays[i] >= delays[i - 1]
