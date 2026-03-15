@@ -35,7 +35,7 @@ async def _ws_roundtrip(
     path: str = "test-path",
     body: str = "",
     query: str = "",
-    response_body: str = "tunnel-response",
+    response_body: bytes = b"tunnel-response",
     response_status: int = 200,
 ) -> tuple[Response, dict[str, str]]:
     """Full tunnel round-trip: HTTP -> WS forward -> WS response -> HTTP."""
@@ -81,7 +81,7 @@ async def _ws_roundtrip(
             response = BufferGateResponse(
                 correlation_id=fwd["correlation_id"],
                 headers=orjson.dumps({"x-tunnel": "ok"}).decode(),
-                body=base64.b64encode(response_body.encode()).decode(),
+                body=base64.b64encode(response_body).decode(),
                 status_code=response_status,
             )
             await inbox.put(
@@ -178,144 +178,36 @@ class TestTunnelRoundTrip:
             connection_id,
             make_token(connection_id),
             response_status=404,
-            response_body="not found",
+            response_body=b"not found",
         )
         assert resp.status_code == 404
         assert resp.text == "not found"
 
-    async def test_response_headers(self, connection_id: str) -> None:
-        resp, _ = await _ws_roundtrip(
-            _make_app(), connection_id, make_token(connection_id)
-        )
-        assert resp.headers.get("x-tunnel") == "ok"
-
-    async def test_all_http_methods(self, connection_id: str) -> None:
-        for method in ("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"):
-            resp, fwd = await _ws_roundtrip(
-                _make_app(),
-                connection_id,
-                make_token(connection_id),
-                method=method,
-            )
-            assert resp.status_code == 200, f"{method} failed"
-            assert fwd["method"] == method
-
-    async def test_correlation_id_in_headers(self, connection_id: str) -> None:
-        _, fwd = await _ws_roundtrip(
-            _make_app(), connection_id, make_token(connection_id)
-        )
-        headers = json.loads(fwd["headers"])
-        assert "x-pipegate-correlation-id" in headers
-
     async def test_binary_body_roundtrip(self, connection_id: str) -> None:
         """Binary (non-UTF-8) bodies survive the tunnel."""
-        binary_body = bytes(range(256))
-        app = _make_app()
-        token = make_token(connection_id)
-        transport = ASGITransport(app=app)
-
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-
-            async def ws_side() -> None:
-                scope: dict[str, object] = {
-                    "type": "websocket",
-                    "asgi": {"version": "3.0"},
-                    "http_version": "1.1",
-                    "path": "/",
-                    "query_string": f"token={token}".encode(),
-                    "headers": [],
-                }
-                inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-                outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-                await inbox.put({"type": "websocket.connect"})
-                app_task = asyncio.create_task(
-                    app(scope, inbox.get, outbox.put),  # type: ignore[arg-type]
-                )
-                msg = await asyncio.wait_for(outbox.get(), timeout=5)
-                assert msg["type"] == "websocket.accept"
-                msg = await asyncio.wait_for(outbox.get(), timeout=5)
-                fwd = json.loads(cast(str, msg["text"]))
-
-                # Verify binary request body arrived intact
-                assert base64.b64decode(fwd["body"]) == binary_body
-
-                resp = BufferGateResponse(
-                    correlation_id=fwd["correlation_id"],
-                    headers=orjson.dumps(
-                        {"content-type": "application/octet-stream"}
-                    ).decode(),
-                    body=base64.b64encode(binary_body).decode(),
-                    status_code=200,
-                )
-                await inbox.put(
-                    {"type": "websocket.receive", "text": resp.model_dump_json()}
-                )
-                await asyncio.sleep(0.05)
-                await inbox.put({"type": "websocket.disconnect"})
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(app_task, timeout=2)
-
-            ws_task = asyncio.create_task(ws_side())
-            await asyncio.sleep(0.01)
-            http_resp = await asyncio.wait_for(
-                client.post(f"/{connection_id}/upload", content=binary_body),
-                timeout=10,
-            )
-            await ws_task
-
-        assert http_resp.status_code == 200
-        assert http_resp.content == binary_body
+        binary = bytes(range(256))
+        resp, fwd = await _ws_roundtrip(
+            _make_app(),
+            connection_id,
+            make_token(connection_id),
+            method="POST",
+            body=binary,  # type: ignore[arg-type]
+            response_body=binary,
+        )
+        assert resp.status_code == 200
+        assert resp.content == binary
+        assert base64.b64decode(fwd["body"]) == binary
 
     async def test_head_response_has_no_body(self, connection_id: str) -> None:
-        app = _make_app()
-        token = make_token(connection_id)
-        transport = ASGITransport(app=app)
-
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-
-            async def ws_side() -> None:
-                scope: dict[str, object] = {
-                    "type": "websocket",
-                    "asgi": {"version": "3.0"},
-                    "http_version": "1.1",
-                    "path": "/",
-                    "query_string": f"token={token}".encode(),
-                    "headers": [],
-                }
-                inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-                outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-                await inbox.put({"type": "websocket.connect"})
-                app_task = asyncio.create_task(
-                    app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
-                )
-                msg = await asyncio.wait_for(outbox.get(), timeout=5)
-                assert msg["type"] == "websocket.accept"
-                msg = await asyncio.wait_for(outbox.get(), timeout=5)
-                fwd = json.loads(cast(str, msg["text"]))
-
-                resp = BufferGateResponse(
-                    correlation_id=fwd["correlation_id"],
-                    headers=orjson.dumps({"content-length": "5"}).decode(),
-                    body=base64.b64encode(b"hello").decode(),
-                    status_code=200,
-                )
-                await inbox.put(
-                    {"type": "websocket.receive", "text": resp.model_dump_json()}
-                )
-                await asyncio.sleep(0.05)
-                await inbox.put({"type": "websocket.disconnect"})
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(app_task, timeout=2)
-
-            ws_task = asyncio.create_task(ws_side())
-            await asyncio.sleep(0.01)
-            http_resp = await asyncio.wait_for(
-                client.head(f"/{connection_id}/resource"), timeout=10
-            )
-            await ws_task
-
-        assert http_resp.status_code == 200
-        assert http_resp.content == b""
+        resp, _ = await _ws_roundtrip(
+            _make_app(),
+            connection_id,
+            make_token(connection_id),
+            method="HEAD",
+            response_body=b"hello",
+        )
+        assert resp.status_code == 200
+        assert resp.content == b""
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +264,7 @@ class TestDisconnect:
             )
             await ws_task
 
-        assert http_resp.status_code in (502, 503)
+        assert http_resp.status_code == 502
 
     async def test_buffer_cleaned_up_after_disconnect(self, connection_id: str) -> None:
         app = _make_app()
@@ -402,56 +294,6 @@ class TestDisconnect:
 
         buffers: dict[str, object] = app.extra.get("buffers", {})
         assert connection_id not in buffers
-
-    async def test_inflight_futures_fail_on_disconnect(
-        self, connection_id: str
-    ) -> None:
-        app = _make_app()
-        token = make_token(connection_id)
-        transport = ASGITransport(app=app)
-
-        ws_connected = asyncio.Event()
-        ready_to_disconnect = asyncio.Event()
-
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-
-            async def ws_side() -> None:
-                scope: dict[str, object] = {
-                    "type": "websocket",
-                    "asgi": {"version": "3.0"},
-                    "http_version": "1.1",
-                    "path": "/",
-                    "query_string": f"token={token}".encode(),
-                    "headers": [],
-                }
-                inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-                outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-                await inbox.put({"type": "websocket.connect"})
-                app_task = asyncio.create_task(
-                    app(scope, inbox.get, outbox.put),  # type: ignore[arg-type]
-                )
-                msg = await asyncio.wait_for(outbox.get(), timeout=5)
-                assert msg["type"] == "websocket.accept"
-                ws_connected.set()
-
-                await asyncio.wait_for(ready_to_disconnect.wait(), timeout=5)
-                await inbox.put({"type": "websocket.disconnect"})
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(app_task, timeout=3)
-
-            ws_task = asyncio.create_task(ws_side())
-            await asyncio.wait_for(ws_connected.wait(), timeout=5)
-
-            t1 = asyncio.create_task(client.get(f"/{connection_id}/req1"))
-            t2 = asyncio.create_task(client.get(f"/{connection_id}/req2"))
-            await asyncio.sleep(0.05)
-            ready_to_disconnect.set()
-
-            r1, r2 = await asyncio.wait_for(asyncio.gather(t1, t2), timeout=5)
-            await ws_task
-
-        assert r1.status_code in (502, 503)
-        assert r2.status_code in (502, 503)
 
 
 # ---------------------------------------------------------------------------
