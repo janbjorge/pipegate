@@ -145,7 +145,7 @@ def create_app() -> FastAPI:
             raise HTTPException(
                 status_code=503,
                 detail="Queue full — tunnel client is too slow or not connected",
-            )
+            ) from None
         except Exception as e:
             futures.pop(correlation_id, None)
             connection_futures[connection_id].discard(correlation_id)
