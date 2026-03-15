@@ -980,3 +980,90 @@ class TestQueueBackpressure:
         assert second_resp.status_code == 503, (
             f"Expected 503 when queue is full, got {second_resp.status_code}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Feature #16 — Strip response body for HEAD requests
+# ---------------------------------------------------------------------------
+
+
+class TestHeadRequestBodyStripped:
+    async def test_head_response_has_no_body(self, connection_id: str) -> None:
+        """HEAD responses must have an empty body per HTTP spec."""
+        app = _make_app_with_settings()
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+
+            async def ws_client_side() -> None:
+                scope: dict[str, object] = {
+                    "type": "websocket",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "path": f"/{connection_id}",
+                    "query_string": f"token={token}".encode(),
+                    "headers": [],
+                }
+                inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                await inbox.put({"type": "websocket.connect"})
+                app_task = asyncio.create_task(
+                    app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+                )
+
+                msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                assert msg["type"] == "websocket.accept"
+                msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                assert msg["type"] == "websocket.send"
+                fwd = json.loads(cast(str, msg["text"]))
+
+                resp = BufferGateResponse(
+                    correlation_id=fwd["correlation_id"],
+                    headers=orjson.dumps({"content-length": "5"}).decode(),
+                    body=base64.b64encode(b"hello").decode(),
+                    status_code=200,
+                )
+                await inbox.put(
+                    {"type": "websocket.receive", "text": resp.model_dump_json()}
+                )
+                await asyncio.sleep(0.05)
+                await inbox.put({"type": "websocket.disconnect"})
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(app_task, timeout=2)
+
+            ws_task = asyncio.create_task(ws_client_side())
+            await asyncio.sleep(0.01)
+            http_resp = await asyncio.wait_for(
+                client.head(
+                    f"/{connection_id}/resource",
+                    headers={"Authorization": f"Bearer {token}"},
+                ),
+                timeout=10,
+            )
+            await ws_task
+
+        assert http_resp.status_code == 200
+        assert http_resp.content == b""
+
+
+# ---------------------------------------------------------------------------
+# Feature #17 — Add GET /healthz health endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestHealthEndpoint:
+    async def test_healthz_returns_200(self, client: AsyncClient) -> None:
+        """GET /healthz must return 200 with {"status": "ok"}."""
+        resp = await client.get("/healthz")
+        assert resp.status_code == 200
+
+    async def test_healthz_returns_ok_body(self, client: AsyncClient) -> None:
+        """GET /healthz response body must be {"status": "ok"}."""
+        resp = await client.get("/healthz")
+        assert resp.json() == {"status": "ok"}
+
+    async def test_healthz_does_not_require_auth(self, client: AsyncClient) -> None:
+        """GET /healthz must be accessible without any Authorization header."""
+        resp = await client.get("/healthz")
+        assert resp.status_code == 200
