@@ -138,9 +138,8 @@ def create_app() -> FastAPI:
             status_code=response.status_code,
         )
 
-    @app.websocket("/{connection_id}")
+    @app.websocket("/")
     async def handle_websocket(
-        connection_id: str,
         websocket: WebSocket,
     ) -> None:
         settings: Settings = websocket.app.extra["settings"]
@@ -149,11 +148,13 @@ def create_app() -> FastAPI:
             await websocket.close(code=1008, reason="Missing token")
             return
         try:
-            verify_token(token, connection_id, settings)
+            payload = verify_token(token, settings)
         except Exception as exc:
-            logger.warning("WebSocket auth failed for %s: %s", connection_id, exc)
+            logger.warning("WebSocket auth failed: %s", exc)
             await websocket.close(code=1008, reason="Invalid token")
             return
+
+        connection_id = payload.sub
 
         await websocket.accept()
         logger.info("WebSocket connected: %s", connection_id)

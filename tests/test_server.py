@@ -4,7 +4,6 @@ import asyncio
 import base64
 import contextlib
 import json
-import uuid
 from typing import cast
 
 import orjson
@@ -58,7 +57,7 @@ async def _ws_roundtrip(
                 "type": "websocket",
                 "asgi": {"version": "3.0"},
                 "http_version": "1.1",
-                "path": f"/{connection_id}",
+                "path": "/",
                 "query_string": f"token={token}".encode(),
                 "headers": [],
             }
@@ -106,7 +105,6 @@ async def _ws_roundtrip(
 
 async def _connect_ws(
     app: FastAPI,
-    connection_id: str,
     *,
     token: str | None = None,
 ) -> str:
@@ -116,7 +114,7 @@ async def _connect_ws(
         "type": "websocket",
         "asgi": {"version": "3.0"},
         "http_version": "1.1",
-        "path": f"/{connection_id}",
+        "path": "/",
         "query_string": query.encode(),
         "headers": [],
     }
@@ -223,7 +221,7 @@ class TestTunnelRoundTrip:
                     "type": "websocket",
                     "asgi": {"version": "3.0"},
                     "http_version": "1.1",
-                    "path": f"/{connection_id}",
+                    "path": "/",
                     "query_string": f"token={token}".encode(),
                     "headers": [],
                 }
@@ -280,7 +278,7 @@ class TestTunnelRoundTrip:
                     "type": "websocket",
                     "asgi": {"version": "3.0"},
                     "http_version": "1.1",
-                    "path": f"/{connection_id}",
+                    "path": "/",
                     "query_string": f"token={token}".encode(),
                     "headers": [],
                 }
@@ -343,7 +341,7 @@ class TestDisconnect:
                     "type": "websocket",
                     "asgi": {"version": "3.0"},
                     "http_version": "1.1",
-                    "path": f"/{connection_id}",
+                    "path": "/",
                     "query_string": f"token={token}".encode(),
                     "headers": [],
                 }
@@ -384,7 +382,7 @@ class TestDisconnect:
             "type": "websocket",
             "asgi": {"version": "3.0"},
             "http_version": "1.1",
-            "path": f"/{connection_id}",
+            "path": "/",
             "query_string": f"token={token}".encode(),
             "headers": [],
         }
@@ -422,7 +420,7 @@ class TestDisconnect:
                     "type": "websocket",
                     "asgi": {"version": "3.0"},
                     "http_version": "1.1",
-                    "path": f"/{connection_id}",
+                    "path": "/",
                     "query_string": f"token={token}".encode(),
                     "headers": [],
                 }
@@ -462,31 +460,18 @@ class TestDisconnect:
 
 
 class TestWebSocketAuth:
-    async def test_rejected_without_token(self, connection_id: str) -> None:
-        assert await _connect_ws(_make_app(), connection_id) == "websocket.close"
-
-    async def test_rejected_with_wrong_token(self, connection_id: str) -> None:
-        wrong = make_token(uuid.uuid4().hex)
-        assert (
-            await _connect_ws(_make_app(), connection_id, token=wrong)
-            == "websocket.close"
-        )
+    async def test_rejected_without_token(self) -> None:
+        assert await _connect_ws(_make_app()) == "websocket.close"
 
     async def test_rejected_with_expired_token(self, connection_id: str) -> None:
         from datetime import timedelta
 
         expired = make_token(connection_id, expires_in=timedelta(seconds=-1))
-        assert (
-            await _connect_ws(_make_app(), connection_id, token=expired)
-            == "websocket.close"
-        )
+        assert await _connect_ws(_make_app(), token=expired) == "websocket.close"
 
     async def test_accepted_with_valid_token(self, connection_id: str) -> None:
         valid = make_token(connection_id)
-        assert (
-            await _connect_ws(_make_app(), connection_id, token=valid)
-            == "websocket.accept"
-        )
+        assert await _connect_ws(_make_app(), token=valid) == "websocket.accept"
 
 
 # ---------------------------------------------------------------------------
