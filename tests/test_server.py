@@ -289,7 +289,7 @@ class TestRaceConditionFutureBeforeEnqueue:
 
         # Reproduce the original broken pattern
         futures_broken: dict[_uuid.UUID, asyncio.Future[BufferGateResponse]] = (
-            _collections.defaultdict(loop.create_future)  # type: ignore[arg-type]
+            _collections.defaultdict(loop.create_future)
         )
 
         cid = _uuid.uuid4()
@@ -405,8 +405,8 @@ class TestDroppedMessageOnDisconnect:
         request, the waiting HTTP future must be resolved immediately with an
         error (not left to time out after 300 s).
         """
+
         from fastapi.websockets import WebSocketDisconnect as _WSD
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         app = _make_app_with_settings()
         token = make_token(connection_id)

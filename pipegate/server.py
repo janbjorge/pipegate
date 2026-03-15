@@ -202,7 +202,7 @@ def create_app() -> FastAPI:
 
         # When either side finishes (disconnect), cancel the other so we
         # don't leak the send() task blocked on buffers[connection_id].get().  (#3)
-        done, pending = await asyncio.wait(
+        _done, pending = await asyncio.wait(
             {receive_task, send_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
