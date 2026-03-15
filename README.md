@@ -5,7 +5,7 @@ A lightweight, self-hosted tunneling proxy built with FastAPI. Expose local serv
 ## How It Works
 
 1. The **server** accepts HTTP requests at `/{connection_id}/{path}` and holds them.
-2. A **client** connects via WebSocket to `/{connection_id}?token=<jwt>`, receives forwarded requests, proxies them to your local service, and sends responses back.
+2. A **client** connects via WebSocket to `/?token=<jwt>`, receives forwarded requests, proxies them to your local service, and sends responses back. The connection ID is extracted from the JWT `sub` claim.
 3. The server returns the response to the original caller.
 
 Request/response bodies are base64-encoded for binary-safe transport over the JSON WebSocket channel.
@@ -30,7 +30,7 @@ python -m pipegate.auth
 python -m pipegate.server
 
 # Start the client (in another terminal)
-python -m pipegate.client http://localhost:3000 "ws://yourserver:8000/{connection_id}?token={jwt}"
+python -m pipegate.client http://localhost:3000 "ws://yourserver:8000/?token={jwt}"
 ```
 
 ## Configuration
@@ -51,7 +51,9 @@ Environment variables (via pydantic-settings):
 |---|---|
 | `GET /healthz` | Health check — `{"status": "ok"}` |
 | `* /{connection_id}/{path}` | Tunnel HTTP endpoint (all methods) |
-| `WS /{connection_id}?token=<jwt>` | WebSocket tunnel (JWT required) |
+| `WS /?token=<jwt>` | WebSocket tunnel (JWT required, connection ID from `sub` claim) |
+
+The connection ID is embedded inside the JWT as the `sub` (subject) claim. The **JWT is the only credential the tunnel client needs** — no separate connection ID argument. External HTTP callers still use the connection ID in the URL path (`/{connection_id}/{path}`), and the server extracts it from the JWT when the tunnel client connects to route traffic to the correct WebSocket tunnel.
 
 ## Development
 
