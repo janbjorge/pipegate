@@ -19,7 +19,6 @@ JWT_ALGORITHM = "HS256"
 
 @pytest.fixture(autouse=True)
 def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Inject required env vars for Settings before every test."""
     monkeypatch.setenv("PIPEGATE_JWT_SECRET", JWT_SECRET)
     monkeypatch.setenv("PIPEGATE_JWT_ALGORITHMS", '["HS256"]')
 
@@ -41,7 +40,6 @@ def make_token(
     algorithm: str = JWT_ALGORITHM,
     expires_in: timedelta = timedelta(days=1),
 ) -> str:
-    """Helper to mint a JWT token for tests."""
     payload = {
         "sub": connection_id,
         "exp": int((datetime.now(UTC) + expires_in).timestamp()),
@@ -50,13 +48,7 @@ def make_token(
 
 
 @pytest.fixture
-def token(connection_id: str) -> str:
-    return make_token(connection_id)
-
-
-@pytest.fixture
 def app() -> FastAPI:
-    """Create app with settings pre-injected (no lifespan under ASGI transport)."""
     application = create_app()
     application.extra["settings"] = Settings(_cli_parse_args=False)
     return application
