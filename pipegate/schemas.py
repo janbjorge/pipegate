@@ -51,3 +51,11 @@ class Settings(BaseSettings):
         alias="PIPEGATE_MAX_QUEUE_DEPTH",
         default=100,
     )
+    buffer_backend: Literal["memory", "redis"] = Field(
+        alias="PIPEGATE_BUFFER_BACKEND",
+        default="memory",
+    )
+    redis_url: str = Field(
+        alias="PIPEGATE_REDIS_URL",
+        default="redis://localhost:6379/0",
+    )

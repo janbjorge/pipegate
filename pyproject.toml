@@ -21,6 +21,9 @@ dependencies = [
     "httpx>=0.27",
 ]
 
+[project.optional-dependencies]
+redis = ["redis[hiredis]>=5.0"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -56,5 +59,5 @@ python_version = "3.12"
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["uvicorn"]
+module = ["uvicorn", "redis", "redis.*"]
 ignore_missing_imports = true

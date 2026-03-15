@@ -44,6 +44,19 @@ Environment variables (via pydantic-settings):
 | `PIPEGATE_CONNECTION_ID` | No | random UUID hex | Custom connection ID for token generation |
 | `PIPEGATE_MAX_BODY_BYTES` | No | 10 MB | Max request body size (413 if exceeded) |
 | `PIPEGATE_MAX_QUEUE_DEPTH` | No | 100 | Max queued requests per connection (503 if exceeded) |
+| `PIPEGATE_BUFFER_BACKEND` | No | `memory` | Buffer backend: `memory` or `redis` |
+| `PIPEGATE_REDIS_URL` | No | `redis://localhost:6379/0` | Redis URL (only used when backend is `redis`) |
+
+## Redis Buffer Backend
+
+By default, request buffers are held in memory. To use Redis instead:
+
+```bash
+pip install pipegate[redis]
+
+export PIPEGATE_BUFFER_BACKEND=redis
+export PIPEGATE_REDIS_URL=redis://localhost:6379/0
+```
 
 ## Endpoints
 

@@ -22,6 +22,7 @@ from fastapi import (
 from pydantic import ValidationError
 
 from .auth import verify_token
+from .buffers import BufferFull, RequestBuffer, create_buffer
 from .schemas import (
     BufferGateRequest,
     BufferGateResponse,
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
-    buffers: dict[str, asyncio.Queue[BufferGateRequest]] = {}
+    buffers: dict[str, RequestBuffer] = {}
     futures: dict[uuid.UUID, asyncio.Future[BufferGateResponse]] = {}
 
     @asynccontextmanager
@@ -48,6 +49,8 @@ def create_app() -> FastAPI:
                     fut.set_exception(
                         HTTPException(status_code=504, detail="Gateway Timeout")
                     )
+            for buf in buffers.values():
+                await buf.close()
 
     app = FastAPI(lifespan=lifespan)
     app.extra["buffers"] = buffers
@@ -80,10 +83,10 @@ def create_app() -> FastAPI:
         futures[correlation_id] = future
 
         if connection_id not in buffers:
-            buffers[connection_id] = asyncio.Queue(maxsize=settings.max_queue_depth)
+            buffers[connection_id] = create_buffer(settings, connection_id)
 
         try:
-            buffers[connection_id].put_nowait(
+            await buffers[connection_id].put(
                 BufferGateRequest(
                     correlation_id=correlation_id,
                     method=cast(Methods, request.method),
@@ -100,7 +103,7 @@ def create_app() -> FastAPI:
                     body=base64.b64encode(raw_body).decode(),
                 )
             )
-        except asyncio.QueueFull:
+        except BufferFull:
             futures.pop(correlation_id, None)
             raise HTTPException(
                 status_code=503,
@@ -148,7 +151,7 @@ def create_app() -> FastAPI:
         logger.info("WebSocket connected: %s", connection_id)
 
         if connection_id not in buffers:
-            buffers[connection_id] = asyncio.Queue(maxsize=settings.max_queue_depth)
+            buffers[connection_id] = create_buffer(settings, connection_id)
 
         async def receive() -> None:
             try:
@@ -197,7 +200,9 @@ def create_app() -> FastAPI:
                 await task
 
         logger.info("WebSocket disconnected: %s", connection_id)
-        buffers.pop(connection_id, None)
+        buf = buffers.pop(connection_id, None)
+        if buf is not None:
+            await buf.close()
 
     return app
 
