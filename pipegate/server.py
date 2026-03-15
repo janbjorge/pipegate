@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import collections
+import contextlib
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import cast, get_args
 
-import async_timeout
 import orjson
 import uvicorn
 from fastapi import (
@@ -63,13 +64,12 @@ def create_app() -> FastAPI:
     buffers: dict[str, asyncio.Queue[BufferGateRequest]] = collections.defaultdict(
         asyncio.Queue
     )
-    futures: dict[uuid.UUID, asyncio.Future[BufferGateResponse]] = (
-        collections.defaultdict(asyncio.Future)
-    )
+    futures: dict[uuid.UUID, asyncio.Future[BufferGateResponse]] = {}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.extra["settings"] = Settings(_cli_parse_args=False)
+        app.extra["buffers"] = buffers
 
         try:
             yield
@@ -81,6 +81,8 @@ def create_app() -> FastAPI:
                     )
 
     app = FastAPI(lifespan=lifespan)
+    # Also store outside of lifespan so tests that skip lifespan can access it
+    app.extra["buffers"] = buffers
 
     @app.api_route(
         "/{connection_id}/{path_slug:path}",
@@ -94,6 +96,13 @@ def create_app() -> FastAPI:
     ) -> Response:
         correlation_id = uuid.uuid4()
 
+        # Create and store the future BEFORE enqueuing so that the WebSocket
+        # receive() handler can always find it via futures.get(), even when
+        # the tunnel client responds before this coroutine resumes.  (#1)
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[BufferGateResponse] = loop.create_future()
+        futures[correlation_id] = future
+
         try:
             await buffers[connection_id].put(
                 BufferGateRequest(
@@ -101,7 +110,7 @@ def create_app() -> FastAPI:
                     method=cast(Methods, request.method),
                     url_path=path_slug,
                     url_query=orjson.dumps(
-                        {k: v for k, v in request.query_params.multi_items()}
+                        list(request.query_params.multi_items())  # #5: preserve dupes
                     ).decode(),
                     headers=orjson.dumps(
                         {
@@ -109,10 +118,11 @@ def create_app() -> FastAPI:
                             "x-pipegate-correlation-id": correlation_id.hex,
                         }
                     ).decode(),
-                    body=(await request.body()).decode(),
+                    body=base64.b64encode(await request.body()).decode(),  # #6
                 )
             )
         except Exception as e:
+            futures.pop(correlation_id, None)
             raise HTTPException(
                 status_code=500, detail=f"Failed to enqueue request: {e}"
             ) from e
@@ -120,15 +130,15 @@ def create_app() -> FastAPI:
         timeout = timedelta(seconds=300)
 
         try:
-            async with async_timeout.timeout(timeout.total_seconds()):
-                response = await futures[correlation_id]
+            async with asyncio.timeout(timeout.total_seconds()):  # #4
+                response = await future
         except TimeoutError as e:
             raise HTTPException(status_code=504, detail="Gateway Timeout") from e
         finally:
             futures.pop(correlation_id, None)
 
         return Response(
-            content=response.body.encode(),
+            content=base64.b64decode(response.body) if response.body else b"",  # #7
             headers=orjson.loads(response.headers) if response.headers else {},
             status_code=response.status_code,
         )
@@ -170,14 +180,39 @@ def create_app() -> FastAPI:
                         await websocket.send_text(request.model_dump_json())
                     except WebSocketDisconnect as e:
                         print(f"WebSocket disconnected during send: {e}")
+                        # The item was already dequeued; fail its future
+                        # immediately so the HTTP caller gets a 502 rather
+                        # than waiting for the 300 s timeout.  (#2)
+                        fut = futures.get(request.correlation_id)
+                        if fut and not fut.done():
+                            fut.set_exception(
+                                HTTPException(
+                                    status_code=502,
+                                    detail="Tunnel client disconnected",
+                                )
+                            )
                         break
                     except Exception as e:
                         print(f"Error sending message: {e}")
             except Exception as e:
                 print(f"Unexpected error in send handler: {e}")
 
-        await asyncio.gather(receive(), send())
+        receive_task = asyncio.create_task(receive())
+        send_task = asyncio.create_task(send())
+
+        # When either side finishes (disconnect), cancel the other so we
+        # don't leak the send() task blocked on buffers[connection_id].get().  (#3)
+        _done, pending = await asyncio.wait(
+            {receive_task, send_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
         print(f"WebSocket connection closed for ID: {connection_id}")
+        buffers.pop(connection_id, None)  # #3: clean up queue entry
 
     return app
 

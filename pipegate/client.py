@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 
 import httpx
 import orjson
@@ -45,13 +46,13 @@ async def handle_request(
             method=request.method,
             url=f"{target}/{request.url_path}",
             headers=orjson.loads(request.headers),
-            params=orjson.loads(request.url_query),
-            content=request.body.encode(),
+            params=orjson.loads(request.url_query),  # list of pairs (#5)
+            content=base64.b64decode(request.body) if request.body else b"",  # #6
         )
         response_payload = BufferGateResponse(
             correlation_id=request.correlation_id,
             headers=orjson.dumps(dict(response.headers)).decode(),
-            body=response.text,
+            body=base64.b64encode(response.content).decode(),  # #7
             status_code=response.status_code,
         )
     except Exception as e:
@@ -74,7 +75,7 @@ async def main(target_url: str, server_url: str) -> None:
     Establish a WebSocket connection to the server and handle requests.
 
     Args:
-        port (int): The port number of the local HTTP server to expose.
+        target_url (str): The local server to route incoming traffic to.
         server_url (str): The WebSocket server URL to connect to.
     """
     typer.secho(
