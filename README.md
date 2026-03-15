@@ -7,11 +7,11 @@ A lightweight, self-hosted tunneling proxy built with FastAPI. Expose local serv
 PipeGate has two sides: a **server** you deploy on public infrastructure, and a **client** that runs on your local machine.
 
 1. The server accepts incoming HTTP requests at `/{connection_id}/{path}`.
-2. A WebSocket client connects to `/{connection_id}` and receives forwarded requests.
+2. A WebSocket tunnel client connects to `/{connection_id}?token=<jwt>` and receives forwarded requests.
 3. The client forwards each request to your local service, then sends the response back over the WebSocket.
 4. The server returns that response to the original HTTP caller.
 
-Requests are matched via a `x-pipegate-correlation-id` header injected by the server.
+Requests are correlated via a `x-pipegate-correlation-id` header injected by the server. Request and response bodies are base64-encoded for binary-safe transport over the JSON WebSocket channel.
 
 ## Prerequisites
 
@@ -38,13 +38,15 @@ pip install git+https://github.com/janbjorge/pipegate.git
 
 PipeGate is configured entirely through environment variables (via pydantic-settings):
 
-| Variable | Required | Description |
-|---|---|---|
-| `PIPEGATE_JWT_SECRET` | **Yes** | Secret key for signing/verifying JWT tokens |
-| `PIPEGATE_JWT_ALGORITHMS` | **Yes** | JSON array of algorithms, e.g. `'["HS256"]'` |
-| `PIPEGATE_CONNECTION_ID` | No | Custom connection ID for token generation (default: random hex UUID) |
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `PIPEGATE_JWT_SECRET` | **Yes** | — | Secret key for signing/verifying JWT tokens |
+| `PIPEGATE_JWT_ALGORITHMS` | **Yes** | — | JSON array of algorithms, e.g. `'["HS256"]'` |
+| `PIPEGATE_CONNECTION_ID` | No | random hex UUID | Custom connection ID for token generation |
+| `PIPEGATE_MAX_BODY_BYTES` | No | `10485760` (10 MB) | Maximum request body size; larger bodies are rejected with 413 |
+| `PIPEGATE_MAX_QUEUE_DEPTH` | No | `100` | Maximum number of queued requests per tunnel connection; excess returns 503 |
 
-Set these before running any command:
+Set the required variables before running any command:
 
 ```bash
 export PIPEGATE_JWT_SECRET="change-me-to-something-secret"
@@ -87,22 +89,23 @@ Binds to `0.0.0.0:8000` by default. To change the host/port, edit the `uvicorn.r
 ### 3. Start the Client
 
 ```bash
-python -m pipegate.client http://localhost:3000 ws://yourserver:8000/{connection_id}
+python -m pipegate.client http://localhost:3000 "ws://yourserver:8000/{connection_id}?token={jwt}"
 ```
 
 Arguments:
 
 - `target_url` — the local service to forward requests to (e.g. `http://localhost:3000`)
-- `server_url` — the PipeGate server WebSocket endpoint (e.g. `ws://yourserver:8000/a1b2c3d4`)
+- `server_url` — the PipeGate server WebSocket endpoint, including the `?token=` query parameter
 
-The client connects to the server via WebSocket, receives forwarded requests, proxies them to your local service, and sends responses back through the tunnel.
+The client connects to the server via WebSocket, receives forwarded requests, proxies them to your local service, and sends responses back through the tunnel. It automatically reconnects with **exponential backoff** (1 s → 2 s → 4 s … up to 60 s) on any connection failure.
 
 ### Endpoints
 
-The server exposes two endpoints:
-
-- **`GET/POST/PUT/DELETE/PATCH/OPTIONS/HEAD /{connection_id}/{path}`** — authenticated HTTP endpoint. Requires `Authorization: Bearer <jwt>` header.
-- **`WS /{connection_id}`** — WebSocket endpoint for tunnel clients.
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /healthz` | None | Health check — returns `{"status": "ok"}` with HTTP 200 |
+| `GET POST PUT DELETE PATCH OPTIONS HEAD /{connection_id}/{path}` | `Authorization: Bearer <jwt>` | Tunnel HTTP endpoint |
+| `WS /{connection_id}?token=<jwt>` | `?token=` query param | WebSocket endpoint for tunnel clients |
 
 ### Example Flow
 
@@ -117,15 +120,21 @@ External caller                PipeGate server              PipeGate client     
       |<-- response -------------    |                            |                       |
 ```
 
-Requests time out after **300 seconds** (5 minutes).
+Requests time out after **300 seconds** (5 minutes). If the tunnel client disconnects while requests are in-flight, those requests fail immediately with 503 rather than waiting for the timeout.
 
-## Security Considerations
+## HTTP Behaviour
 
-PipeGate has minimal built-in security. Be aware of the following:
+- **Binary bodies** — request and response bodies are base64-encoded for transport, so file uploads, protobuf, and any non-UTF-8 content are handled correctly.
+- **Duplicate query parameters** — `?a=1&a=2` is preserved as-is and forwarded with both values.
+- **HEAD requests** — the response body is stripped as required by the HTTP spec, even if the local service returns one.
+- **Request body limit** — bodies exceeding `PIPEGATE_MAX_BODY_BYTES` are rejected with `413 Request Entity Too Large` before they reach the queue.
+- **Queue backpressure** — when a connection's queue is full (tunnel client too slow or not connected), new requests get `503 Service Unavailable` immediately.
 
-- **HTTP endpoints require JWT auth** — requests without a valid `Authorization: Bearer` header are rejected (401/403).
-- **The WebSocket endpoint has no authentication** — anyone who knows a connection ID can connect. Protect it at the network level (firewall, VPN, reverse proxy).
-- Use **HTTPS/WSS** in production to encrypt traffic.
+## Security
+
+- **HTTP endpoints require JWT auth** — requests without a valid `Authorization: Bearer <token>` header are rejected with 401/403.
+- **WebSocket endpoint requires JWT auth** — the token is passed as a `?token=<jwt>` query parameter (WebSocket clients cannot send custom headers). Connections without a valid token are rejected with close code 1008 before being accepted.
+- Use **HTTPS/WSS** in production to encrypt traffic and prevent token interception.
 - Use a strong, random `PIPEGATE_JWT_SECRET`.
 - Tokens are valid for 21 days — rotate them periodically.
 - Consider rate limiting and monitoring at the reverse proxy layer.
@@ -133,8 +142,10 @@ PipeGate has minimal built-in security. Be aware of the following:
 ## Development
 
 ```bash
-uv sync          # install deps (including dev group)
-uv run pytest    # run tests (37 tests, zero warnings)
+uv sync               # install deps including dev group
+uv run pytest         # run tests
+uv run ruff check .   # lint
+uv run mypy pipegate/ tests/  # type check
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture overview and contribution guidelines.
