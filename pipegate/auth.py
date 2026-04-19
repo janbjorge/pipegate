@@ -14,9 +14,7 @@ class TokenResult(NamedTuple):
     bearer: str
 
 
-def generate_token(
-    settings: Settings, connection_id: str | None = None
-) -> TokenResult:
+def generate_token(settings: Settings, connection_id: str | None = None) -> TokenResult:
     """Create a connection ID and signed JWT."""
     cid = connection_id or settings.connection_id or uuid.uuid4().hex
     now = datetime.now(UTC)

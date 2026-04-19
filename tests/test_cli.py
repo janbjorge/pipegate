@@ -63,8 +63,11 @@ class TestTokenCommand:
         assert result.exit_code == 0
         raw = _find_line(result.output, "JWT Bearer:").split("JWT Bearer:")[1].strip()
         decoded = pyjwt.decode(
-            raw, JWT_SECRET, algorithms=[JWT_ALGORITHM],
-            audience=JWT_AUDIENCE, issuer=JWT_ISSUER,
+            raw,
+            JWT_SECRET,
+            algorithms=[JWT_ALGORITHM],
+            audience=JWT_AUDIENCE,
+            issuer=JWT_ISSUER,
         )
         assert decoded["sub"] == "verifyme"
 
