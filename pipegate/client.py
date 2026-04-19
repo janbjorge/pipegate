@@ -35,7 +35,10 @@ async def handle_request(
             status_code=response.status_code,
         )
     except Exception as e:
-        print(f"Error processing request {request.correlation_id}: {e}", file=sys.stderr)
+        print(
+            f"Error processing request {request.correlation_id}: {e}",
+            file=sys.stderr,
+        )
         payload = BufferGateResponse(
             correlation_id=request.correlation_id,
             headers="{}",
@@ -53,7 +56,10 @@ async def main(target_url: str, server_url: str) -> None:
         delay = min(_BACKOFF_BASE * (2**attempt), _BACKOFF_MAX)
 
         if attempt > 0:
-            print(f"Reconnecting in {delay:.0f}s (attempt {attempt + 1})...", file=sys.stderr)
+            print(
+                f"Reconnecting in {delay:.0f}s (attempt {attempt + 1})...",
+                file=sys.stderr,
+            )
             await asyncio.sleep(delay)
 
         print(f"Connecting to {server_url}...")

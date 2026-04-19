@@ -25,7 +25,9 @@ def token_cmd() -> None:
 @app.command("client")
 def client_cmd(
     target_url: str = typer.Argument(..., help="Local server to forward requests to."),
-    server_url: str = typer.Argument(..., help="PipeGate server WebSocket URL (include ?token=…)."),
+    server_url: str = typer.Argument(
+        ..., help="PipeGate server WebSocket URL (include ?token=…)"
+    ),
 ) -> None:
     """Start the tunnel client."""
     asyncio.run(run_client(target_url, server_url))

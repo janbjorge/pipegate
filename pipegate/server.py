@@ -77,7 +77,9 @@ def create_app() -> FastAPI:
         future: asyncio.Future[BufferGateResponse] = asyncio.Future()
         futures[correlation_id] = future
 
-        queue = buffers.setdefault(connection_id, asyncio.Queue(maxsize=settings.max_queue_depth))
+        queue = buffers.setdefault(
+            connection_id, asyncio.Queue(maxsize=settings.max_queue_depth)
+        )
 
         try:
             queue.put_nowait(
@@ -144,7 +146,9 @@ def create_app() -> FastAPI:
         await websocket.accept()
         logger.info("WebSocket connected: %s", connection_id)
 
-        queue = buffers.setdefault(connection_id, asyncio.Queue(maxsize=settings.max_queue_depth))
+        queue = buffers.setdefault(
+            connection_id, asyncio.Queue(maxsize=settings.max_queue_depth)
+        )
 
         async def receive() -> None:
             try:

@@ -52,7 +52,9 @@ class TestGenerateToken:
         payload = verify_token(token, settings)
         assert payload.sub == cid
 
-    def test_uses_pinned_connection_id(self, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_uses_pinned_connection_id(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("PIPEGATE_CONNECTION_ID", "pinned-id")
         s = Settings()
         cid, token = generate_token(s)
