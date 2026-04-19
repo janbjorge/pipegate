@@ -4,13 +4,14 @@ import asyncio
 import base64
 import contextlib
 import json
+import uuid
 from typing import cast
 
 import orjson
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 
-from pipegate.schemas import BufferGateResponse, Settings
+from pipegate.schemas import BufferGateRequest, BufferGateResponse, Settings
 from pipegate.server import create_app
 
 from .conftest import make_token
@@ -37,6 +38,7 @@ async def _ws_roundtrip(
     query: str = "",
     response_body: bytes = b"tunnel-response",
     response_status: int = 200,
+    response_headers: str | None = None,
 ) -> tuple[Response, dict[str, str]]:
     """Full tunnel round-trip: HTTP -> WS forward -> WS response -> HTTP."""
     transport = ASGITransport(app=app)
@@ -80,7 +82,9 @@ async def _ws_roundtrip(
 
             response = BufferGateResponse(
                 correlation_id=fwd["correlation_id"],
-                headers=orjson.dumps({"x-tunnel": "ok"}).decode(),
+                headers=response_headers
+                if response_headers is not None
+                else orjson.dumps({"x-tunnel": "ok"}).decode(),
                 body=base64.b64encode(response_body).decode(),
                 status_code=response_status,
             )
@@ -372,3 +376,111 @@ class TestHealth:
         resp = await client.get("/healthz")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# PR #24: empty headers in WS error response
+# ---------------------------------------------------------------------------
+
+#
+# Server guard: orjson.loads(response.headers) if response.headers else {}
+# headers="" is falsy → safe today. headers="{}" is valid JSON either way.
+# orjson.loads("") raises JSONDecodeError, so "{}" is the correct value for
+# any consumer without the guard.
+
+
+class TestEmptyHeadersHandling:
+    async def test_empty_string_headers_does_not_crash_server(
+        self, connection_id: str
+    ) -> None:
+        # server guard makes "" safe — passes on both old and new code
+        resp, _ = await _ws_roundtrip(
+            _make_app(),
+            connection_id,
+            make_token(connection_id),
+            response_headers="",
+            response_body=b"",
+            response_status=504,
+        )
+        assert resp.status_code == 504
+
+    async def test_empty_json_object_headers_works(self, connection_id: str) -> None:
+        resp, _ = await _ws_roundtrip(
+            _make_app(),
+            connection_id,
+            make_token(connection_id),
+            response_headers="{}",
+            response_body=b"",
+            response_status=504,
+        )
+        assert resp.status_code == 504
+
+    def test_empty_string_is_not_valid_json(self) -> None:
+        # Guard is load-bearing: removing it would crash on headers=""
+        import pytest
+
+        with pytest.raises(Exception):
+            orjson.loads("")
+        assert orjson.loads("{}") == {}
+
+
+# ---------------------------------------------------------------------------
+# PR #24: send() must use the queue captured at connect, not dict re-lookup
+# ---------------------------------------------------------------------------
+
+#
+# If buffers[connection_id] is replaced while a WS is active, the original
+# send() (dict lookup each iteration) drains the replacement queue silently.
+# The fix captures `queue` as a local variable at connect time.
+
+
+class TestQueueStability:
+    async def test_send_uses_captured_queue_not_dict_lookup(
+        self, connection_id: str
+    ) -> None:
+        """Replace buffers[connection_id] while send() is blocked; verify send()
+        ignores the replacement (fixed) rather than draining it (original bug)."""
+        app = _make_app()
+        token = make_token(connection_id)
+        scope: dict[str, object] = {
+            "type": "websocket",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "path": "/",
+            "query_string": f"token={token}".encode(),
+            "headers": [],
+        }
+        inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+        await inbox.put({"type": "websocket.connect"})
+        app_task = asyncio.create_task(app(scope, inbox.get, outbox.put))  # type: ignore[arg-type]
+
+        msg = await asyncio.wait_for(outbox.get(), timeout=5)
+        assert msg["type"] == "websocket.accept"
+
+        buffers: dict[str, asyncio.Queue[BufferGateRequest]] = app.extra["buffers"]
+        replacement: asyncio.Queue[BufferGateRequest] = asyncio.Queue(maxsize=100)
+        buffers[connection_id] = replacement
+
+        replacement.put_nowait(
+            BufferGateRequest(
+                correlation_id=uuid.uuid4(),
+                url_path="injected",
+                url_query="[]",
+                method="GET",
+                headers="{}",
+                body="",
+            )
+        )
+
+        await asyncio.sleep(0.05)
+        received_from_replacement = not outbox.empty()
+
+        await inbox.put({"type": "websocket.disconnect", "code": 1000})
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(app_task, timeout=2)
+
+        assert not received_from_replacement, (
+            "send() read from a replacement queue — it must use the captured queue ref"
+        )
