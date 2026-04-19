@@ -40,16 +40,23 @@ Requests to `http://yourserver:8000/a1b2c3d4/anything` now reach `http://localho
 ## CLI
 
 ```
-pipegate token [--connection-id ID]        Generate a JWT bearer token
-pipegate client TARGET_URL SERVER_URL      Start the tunnel client
-pipegate server [--host HOST] [--port N]   Start the server (default: 0.0.0.0:8000)
+pipegate token [-c ID]              Generate a JWT bearer token
+pipegate client TARGET_URL WS_URL   Start the tunnel client
+pipegate server [--host H] [-p N]   Start the server (default: 0.0.0.0:8000)
 ```
 
-Pin a specific connection ID so your public URL stays stable across token renewals:
+Pin a connection ID so your public URL stays stable across token renewals:
 
 ```bash
+# via flag (one-off)
 pipegate token --connection-id my-app
+
+# via env var (persistent)
+export PIPEGATE_CONNECTION_ID=my-app
+pipegate token
 ```
+
+Flag takes precedence over the env var.
 
 ## How It Works
 

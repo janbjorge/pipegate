@@ -52,16 +52,26 @@ class TestGenerateToken:
         payload = verify_token(token, settings)
         assert payload.sub == cid
 
-    def test_uses_pinned_connection_id(
-        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("PIPEGATE_CONNECTION_ID", "pinned-id")
-        s = Settings()
-        cid, token = generate_token(s)
-        assert cid == "pinned-id"
-        assert verify_token(token, s).sub == "pinned-id"
+    def test_explicit_id_takes_precedence(self, settings: Settings) -> None:
+        cid, token = generate_token(settings, connection_id="explicit")
+        assert cid == "explicit"
+        assert verify_token(token, settings).sub == "explicit"
 
-    def test_random_connection_id_when_unset(self, settings: Settings) -> None:
+    def test_falls_back_to_settings_connection_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PIPEGATE_CONNECTION_ID", "from-env")
+        cid, _ = generate_token(Settings())
+        assert cid == "from-env"
+
+    def test_explicit_overrides_settings_connection_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PIPEGATE_CONNECTION_ID", "from-env")
+        cid, _ = generate_token(Settings(), connection_id="explicit")
+        assert cid == "explicit"
+
+    def test_random_when_nothing_pinned(self, settings: Settings) -> None:
         cid1, _ = generate_token(settings)
         cid2, _ = generate_token(settings)
         assert cid1 != cid2

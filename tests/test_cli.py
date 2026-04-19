@@ -39,10 +39,23 @@ class TestTokenCommand:
         id2 = _find_line(r2.output, "Connection-id:")
         assert id1 != id2
 
+    def test_pinned_via_flag(self) -> None:
+        result = runner.invoke(app, ["token", "--connection-id", "flagged"], env=ENV)
+        assert "Connection-id: flagged" in result.output
+
+    def test_short_flag(self) -> None:
+        result = runner.invoke(app, ["token", "-c", "short"], env=ENV)
+        assert "Connection-id: short" in result.output
+
     def test_pinned_via_env_var(self) -> None:
         env = {**ENV, "PIPEGATE_CONNECTION_ID": "pinned"}
         result = runner.invoke(app, ["token"], env=env)
         assert "Connection-id: pinned" in result.output
+
+    def test_flag_overrides_env_var(self) -> None:
+        env = {**ENV, "PIPEGATE_CONNECTION_ID": "from-env"}
+        result = runner.invoke(app, ["token", "-c", "from-flag"], env=env)
+        assert "Connection-id: from-flag" in result.output
 
     def test_generated_token_is_verifiable(self) -> None:
         env = {**ENV, "PIPEGATE_CONNECTION_ID": "verifyme"}

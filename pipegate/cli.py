@@ -14,10 +14,14 @@ app = typer.Typer(help="PipeGate — self-hosted HTTP tunnel.")
 
 
 @app.command("token")
-def token_cmd() -> None:
+def token_cmd(
+    connection_id: str | None = typer.Option(
+        None, "--connection-id", "-c", help="Pin a connection ID (overrides env var)."
+    ),
+) -> None:
     """Generate a JWT bearer token for a tunnel connection."""
     settings = Settings()
-    cid, token = generate_token(settings)
+    cid, token = generate_token(settings, connection_id)
     typer.echo(f"Connection-id: {cid}")
     typer.echo(f"JWT Bearer:    {token}")
 
