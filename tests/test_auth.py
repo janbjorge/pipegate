@@ -6,10 +6,10 @@ from datetime import timedelta
 import jwt
 import pytest
 
-from pipegate.auth import AUDIENCE, ISSUER, TokenResult, generate_token, verify_token
+from pipegate.auth import TokenResult, generate_token, verify_token
 from pipegate.schemas import JWTPayload, Settings
 
-from .conftest import JWT_ALGORITHM, JWT_SECRET, make_token
+from .conftest import make_token
 
 
 class TestVerifyToken:
@@ -43,25 +43,27 @@ class TestVerifyToken:
     def test_wrong_audience_rejected(
         self, connection_id: str, settings: Settings
     ) -> None:
-        token = jwt.encode(
-            {"sub": connection_id, "exp": 9999999999, "aud": "other", "iss": ISSUER},
-            JWT_SECRET,
-            algorithm=JWT_ALGORITHM,
-        )
+        token = make_token(connection_id, audience="other")
         with pytest.raises(jwt.InvalidAudienceError):
             verify_token(token, settings)
 
     def test_wrong_issuer_rejected(
         self, connection_id: str, settings: Settings
     ) -> None:
-        token = jwt.encode(
-            {"sub": connection_id, "exp": 9999999999, "aud": AUDIENCE, "iss": "other"},
-            JWT_SECRET,
-            algorithm=JWT_ALGORITHM,
-        )
+        token = make_token(connection_id, issuer="other")
         with pytest.raises(jwt.InvalidIssuerError):
             verify_token(token, settings)
 
+    def test_custom_issuer_and_audience(
+        self, connection_id: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PIPEGATE_JWT_ISSUER", "my-issuer")
+        monkeypatch.setenv("PIPEGATE_JWT_AUDIENCE", "my-audience")
+        s = Settings()
+        result = generate_token(s, connection_id=connection_id)
+        payload = verify_token(result.bearer, s)
+        assert payload.iss == "my-issuer"
+        assert payload.aud == "my-audience"
 
 
 class TestGenerateToken:
@@ -99,8 +101,14 @@ class TestGenerateToken:
         cid2 = generate_token(settings).connection_id
         assert cid1 != cid2
 
-    def test_token_expires_in_21_days(self, settings: Settings) -> None:
+    def test_custom_ttl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PIPEGATE_JWT_TTL_DAYS", "7")
+        s = Settings()
+        result = generate_token(s)
+        payload = verify_token(result.bearer, s)
+        assert abs(payload.exp - (int(time.time()) + 7 * 24 * 3600)) < 60
+
+    def test_default_ttl_is_21_days(self, settings: Settings) -> None:
         result = generate_token(settings)
         payload = verify_token(result.bearer, settings)
-        days_21 = 21 * 24 * 3600
-        assert abs(payload.exp - (int(time.time()) + days_21)) < 60
+        assert abs(payload.exp - (int(time.time()) + 21 * 24 * 3600)) < 60

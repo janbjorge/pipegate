@@ -10,12 +10,13 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from pipegate.auth import AUDIENCE, ISSUER
 from pipegate.schemas import Settings
 from pipegate.server import create_app
 
 JWT_SECRET = "test-secret-that-is-long-enough-for-hs256!"
 JWT_ALGORITHM = "HS256"
+JWT_ISSUER = "pipegate"
+JWT_AUDIENCE = "pipegate"
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +40,8 @@ def make_token(
     *,
     secret: str = JWT_SECRET,
     algorithm: str = JWT_ALGORITHM,
+    issuer: str = JWT_ISSUER,
+    audience: str = JWT_AUDIENCE,
     expires_in: timedelta = timedelta(days=1),
 ) -> str:
     now = datetime.now(UTC)
@@ -48,8 +51,8 @@ def make_token(
         "exp": int((now + expires_in).timestamp()),
         "nbf": ts,
         "iat": ts,
-        "iss": ISSUER,
-        "aud": AUDIENCE,
+        "iss": issuer,
+        "aud": audience,
         "jti": uuid.uuid4().hex,
     }
     return jwt.encode(payload, secret, algorithm=algorithm)

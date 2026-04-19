@@ -104,6 +104,9 @@ Environment variables via pydantic-settings:
 |---|---|---|---|
 | `PIPEGATE_JWT_SECRET` | Yes | -- | Shared secret for JWT signing/verification |
 | `PIPEGATE_JWT_ALGORITHMS` | Yes | -- | Algorithm list, e.g. `'["HS256"]'` |
+| `PIPEGATE_JWT_ISSUER` | No | `pipegate` | JWT `iss` claim — must match on both sides |
+| `PIPEGATE_JWT_AUDIENCE` | No | `pipegate` | JWT `aud` claim — must match on both sides |
+| `PIPEGATE_JWT_TTL_DAYS` | No | `21` | Token lifetime in days |
 | `PIPEGATE_CONNECTION_ID` | No | random UUID | Pin a specific connection ID when generating tokens |
 | `PIPEGATE_MAX_BODY_BYTES` | No | 10 MB | Reject requests larger than this (413) |
 | `PIPEGATE_MAX_QUEUE_DEPTH` | No | 100 | Per-tunnel queue size before returning 503 |
