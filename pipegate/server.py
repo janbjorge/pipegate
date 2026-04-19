@@ -75,15 +75,15 @@ def create_app() -> FastAPI:
                 detail=f"Request body exceeds limit of {settings.max_body_bytes} bytes",
             )
 
-        loop = asyncio.get_event_loop()
-        future: asyncio.Future[BufferGateResponse] = loop.create_future()
+        future: asyncio.Future[BufferGateResponse] = asyncio.Future()
         futures[correlation_id] = future
 
         if connection_id not in buffers:
             buffers[connection_id] = asyncio.Queue(maxsize=settings.max_queue_depth)
+        queue = buffers[connection_id]
 
         try:
-            buffers[connection_id].put_nowait(
+            queue.put_nowait(
                 BufferGateRequest(
                     correlation_id=correlation_id,
                     method=cast(Methods, request.method),
@@ -149,6 +149,7 @@ def create_app() -> FastAPI:
 
         if connection_id not in buffers:
             buffers[connection_id] = asyncio.Queue(maxsize=settings.max_queue_depth)
+        queue = buffers[connection_id]
 
         async def receive() -> None:
             try:
@@ -170,7 +171,7 @@ def create_app() -> FastAPI:
 
         async def send() -> None:
             while True:
-                request = await buffers[connection_id].get()
+                request = await queue.get()
                 try:
                     await websocket.send_text(request.model_dump_json())
                 except WebSocketDisconnect:

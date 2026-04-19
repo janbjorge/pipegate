@@ -46,7 +46,7 @@ async def handle_request(
         typer.echo(f"Error processing request {request.correlation_id}: {e}", err=True)
         payload = BufferGateResponse(
             correlation_id=request.correlation_id,
-            headers="",
+            headers="{}",
             body="",
             status_code=504,
         )

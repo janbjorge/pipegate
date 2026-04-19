@@ -90,6 +90,39 @@ class TestHandleRequest:
         assert resp.status_code == 504
         assert resp.body == ""
 
+    async def test_error_response_headers_is_valid_json(self) -> None:
+        """PR #24: client error path must emit parseable headers.
+
+        headers="" fails orjson.loads("") → JSONDecodeError if any consumer
+        calls orjson.loads without a falsy guard.
+        headers="{}" is valid JSON and the correct fix.
+
+        This test FAILS on the original code (headers="") and PASSES on the fix.
+        """
+        ws = AsyncMock()
+        request = BufferGateRequest(
+            correlation_id=uuid.uuid4(),
+            url_path="api/data",
+            url_query=orjson.dumps([]).decode(),
+            method="GET",
+            headers=orjson.dumps({}).decode(),
+            body="",
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused")
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as http_client:
+            await handle_request("http://localhost:9000", request, http_client, ws)
+
+        resp = BufferGateResponse.model_validate_json(ws.send.call_args[0][0])
+        assert resp.status_code == 504
+        # Must be parseable JSON — orjson.loads("") raises JSONDecodeError
+        parsed = orjson.loads(resp.headers)
+        assert parsed == {}
+
 
 class TestMainReconnect:
     async def test_retries_on_connection_refused(self) -> None:
