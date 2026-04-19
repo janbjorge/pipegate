@@ -8,9 +8,9 @@ import jwt
 from .schemas import JWTPayload, Settings
 
 
-def generate_token(connection_id: str | None, settings: Settings) -> tuple[str, str]:
+def generate_token(settings: Settings) -> tuple[str, str]:
     """Create a connection ID and signed JWT. Returns (connection_id, bearer_token)."""
-    cid = connection_id or uuid.uuid4().hex
+    cid = settings.connection_id or uuid.uuid4().hex
     payload = JWTPayload(
         sub=cid,
         exp=int((datetime.now(UTC) + timedelta(days=21)).timestamp()),

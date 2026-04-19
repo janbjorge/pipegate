@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import timedelta
 
 import jwt
@@ -42,36 +43,33 @@ class TestVerifyToken:
 
 class TestGenerateToken:
     def test_returns_tuple(self, settings: Settings) -> None:
-        cid, token = generate_token(None, settings)
+        cid, token = generate_token(settings)
         assert isinstance(cid, str)
         assert isinstance(token, str)
 
     def test_generated_token_is_valid(self, settings: Settings) -> None:
-        cid, token = generate_token(None, settings)
+        cid, token = generate_token(settings)
         payload = verify_token(token, settings)
         assert payload.sub == cid
 
-    def test_pinned_connection_id(self, settings: Settings) -> None:
-        cid, token = generate_token("myconn", settings)
-        assert cid == "myconn"
-        payload = verify_token(token, settings)
-        assert payload.sub == "myconn"
+    def test_uses_pinned_connection_id(self, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PIPEGATE_CONNECTION_ID", "pinned-id")
+        s = Settings()
+        cid, token = generate_token(s)
+        assert cid == "pinned-id"
+        assert verify_token(token, s).sub == "pinned-id"
 
-    def test_random_connection_id_when_none(self, settings: Settings) -> None:
-        cid1, _ = generate_token(None, settings)
-        cid2, _ = generate_token(None, settings)
+    def test_random_connection_id_when_unset(self, settings: Settings) -> None:
+        cid1, _ = generate_token(settings)
+        cid2, _ = generate_token(settings)
         assert cid1 != cid2
 
     def test_token_expires_in_21_days(self, settings: Settings) -> None:
-        import time
-
-        _, token = generate_token(None, settings)
+        _, token = generate_token(settings)
         decoded = jwt.decode(
             token,
             settings.jwt_secret.get_secret_value(),
             algorithms=settings.jwt_algorithms,
         )
-        now = int(time.time())
         days_21 = 21 * 24 * 3600
-        # Allow ±60s for test execution time
-        assert abs(decoded["exp"] - (now + days_21)) < 60
+        assert abs(decoded["exp"] - (int(time.time()) + days_21)) < 60

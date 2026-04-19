@@ -3,11 +3,10 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
+import jwt as pyjwt
 from typer.testing import CliRunner
 
-from pipegate.auth import verify_token
 from pipegate.cli import app
-from pipegate.schemas import Settings
 
 from .conftest import JWT_ALGORITHM, JWT_SECRET
 
@@ -29,37 +28,25 @@ class TestTokenCommand:
         assert "Connection-id:" in result.output
         assert "JWT Bearer:" in result.output
 
-    def test_pinned_connection_id(self) -> None:
-        result = runner.invoke(app, ["token", "--connection-id", "myconn123"], env=ENV)
-        assert result.exit_code == 0
-        assert "Connection-id: myconn123" in result.output
-
-    def test_short_flag_connection_id(self) -> None:
-        result = runner.invoke(app, ["token", "-c", "short123"], env=ENV)
-        assert result.exit_code == 0
-        assert "Connection-id: short123" in result.output
-
-    def test_generated_token_is_verifiable(self) -> None:
-        result = runner.invoke(app, ["token", "--connection-id", "verifyme"], env=ENV)
-        assert result.exit_code == 0
-
-        import jwt as pyjwt
-
-        token_line = [l for l in result.output.splitlines() if "JWT Bearer:" in l][0]
-        token = token_line.split("JWT Bearer:")[1].strip()
-
-        decoded = pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        assert decoded["sub"] == "verifyme"
-
     def test_random_ids_differ(self) -> None:
         r1 = runner.invoke(app, ["token"], env=ENV)
         r2 = runner.invoke(app, ["token"], env=ENV)
-        id1 = [l for l in r1.output.splitlines() if "Connection-id:" in l][0]
-        id2 = [l for l in r2.output.splitlines() if "Connection-id:" in l][0]
+        id1 = next(l for l in r1.output.splitlines() if "Connection-id:" in l)
+        id2 = next(l for l in r2.output.splitlines() if "Connection-id:" in l)
         assert id1 != id2
 
+    def test_pinned_via_env_var(self) -> None:
+        result = runner.invoke(app, ["token"], env={**ENV, "PIPEGATE_CONNECTION_ID": "pinned"})
+        assert "Connection-id: pinned" in result.output
+
+    def test_generated_token_is_verifiable(self) -> None:
+        result = runner.invoke(app, ["token"], env={**ENV, "PIPEGATE_CONNECTION_ID": "verifyme"})
+        assert result.exit_code == 0
+        token = next(l for l in result.output.splitlines() if "JWT Bearer:" in l).split("JWT Bearer:")[1].strip()
+        decoded = pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        assert decoded["sub"] == "verifyme"
+
     def test_missing_jwt_secret_exits_nonzero(self) -> None:
-        # Remove PIPEGATE_JWT_SECRET from the actual environment (autouse fixture set it)
         clean = {k: v for k, v in os.environ.items() if k != "PIPEGATE_JWT_SECRET"}
         with patch.dict(os.environ, clean, clear=True):
             result = runner.invoke(app, ["token"])
