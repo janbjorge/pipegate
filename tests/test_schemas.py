@@ -53,7 +53,10 @@ class TestBufferGateResponse:
 
 class TestJWTPayload:
     def test_valid(self) -> None:
-        p = JWTPayload(sub="abc", exp=9999999999)
+        p = JWTPayload(
+            sub="abc", exp=9999999999, nbf=0, iat=0,
+            iss="pipegate", aud="pipegate", jti="x",
+        )
         assert p.sub == "abc"
 
     def test_missing_sub(self) -> None:

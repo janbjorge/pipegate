@@ -6,10 +6,10 @@ from datetime import timedelta
 import jwt
 import pytest
 
-from pipegate.auth import TokenResult, generate_token, verify_token
+from pipegate.auth import AUDIENCE, ISSUER, TokenResult, generate_token, verify_token
 from pipegate.schemas import JWTPayload, Settings
 
-from .conftest import make_token
+from .conftest import JWT_ALGORITHM, JWT_SECRET, make_token
 
 
 class TestVerifyToken:
@@ -39,6 +39,29 @@ class TestVerifyToken:
     def test_empty_token(self, settings: Settings) -> None:
         with pytest.raises(jwt.DecodeError):
             verify_token("", settings)
+
+    def test_wrong_audience_rejected(
+        self, connection_id: str, settings: Settings
+    ) -> None:
+        token = jwt.encode(
+            {"sub": connection_id, "exp": 9999999999, "aud": "other", "iss": ISSUER},
+            JWT_SECRET,
+            algorithm=JWT_ALGORITHM,
+        )
+        with pytest.raises(jwt.InvalidAudienceError):
+            verify_token(token, settings)
+
+    def test_wrong_issuer_rejected(
+        self, connection_id: str, settings: Settings
+    ) -> None:
+        token = jwt.encode(
+            {"sub": connection_id, "exp": 9999999999, "aud": AUDIENCE, "iss": "other"},
+            JWT_SECRET,
+            algorithm=JWT_ALGORITHM,
+        )
+        with pytest.raises(jwt.InvalidIssuerError):
+            verify_token(token, settings)
+
 
 
 class TestGenerateToken:
@@ -78,10 +101,6 @@ class TestGenerateToken:
 
     def test_token_expires_in_21_days(self, settings: Settings) -> None:
         result = generate_token(settings)
-        decoded = jwt.decode(
-            result.bearer,
-            settings.jwt_secret.get_secret_value(),
-            algorithms=settings.jwt_algorithms,
-        )
+        payload = verify_token(result.bearer, settings)
         days_21 = 21 * 24 * 3600
-        assert abs(decoded["exp"] - (int(time.time()) + days_21)) < 60
+        assert abs(payload.exp - (int(time.time()) + days_21)) < 60

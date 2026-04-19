@@ -34,8 +34,13 @@ class BufferGateResponse(BaseModel):
 
 
 class JWTPayload(BaseModel):
-    sub: str
-    exp: int
+    sub: str   # connection_id
+    exp: int   # expiry (unix)
+    nbf: int   # not before (unix)
+    iat: int   # issued at (unix)
+    iss: str   # issuer
+    aud: str   # audience
+    jti: str   # unique token id
 
 
 class Settings(BaseSettings):

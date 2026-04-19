@@ -10,6 +10,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from pipegate.auth import AUDIENCE, ISSUER
 from pipegate.schemas import Settings
 from pipegate.server import create_app
 
@@ -40,9 +41,16 @@ def make_token(
     algorithm: str = JWT_ALGORITHM,
     expires_in: timedelta = timedelta(days=1),
 ) -> str:
+    now = datetime.now(UTC)
+    ts = int(now.timestamp())
     payload = {
         "sub": connection_id,
-        "exp": int((datetime.now(UTC) + expires_in).timestamp()),
+        "exp": int((now + expires_in).timestamp()),
+        "nbf": ts,
+        "iat": ts,
+        "iss": ISSUER,
+        "aud": AUDIENCE,
+        "jti": uuid.uuid4().hex,
     }
     return jwt.encode(payload, secret, algorithm=algorithm)
 

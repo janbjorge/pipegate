@@ -6,6 +6,7 @@ from unittest.mock import patch
 import jwt as pyjwt
 from typer.testing import CliRunner
 
+from pipegate.auth import AUDIENCE, ISSUER
 from pipegate.cli import app
 
 from .conftest import JWT_ALGORITHM, JWT_SECRET
@@ -62,7 +63,10 @@ class TestTokenCommand:
         result = runner.invoke(app, ["token"], env=env)
         assert result.exit_code == 0
         raw = _find_line(result.output, "JWT Bearer:").split("JWT Bearer:")[1].strip()
-        decoded = pyjwt.decode(raw, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        decoded = pyjwt.decode(
+            raw, JWT_SECRET, algorithms=[JWT_ALGORITHM],
+            audience=AUDIENCE, issuer=ISSUER,
+        )
         assert decoded["sub"] == "verifyme"
 
     def test_missing_jwt_secret_exits_nonzero(self) -> None:
