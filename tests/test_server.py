@@ -419,7 +419,7 @@ class TestEmptyHeadersHandling:
         # Guard is load-bearing: removing it would crash on headers=""
         import pytest
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             orjson.loads("")
         assert orjson.loads("{}") == {}
 
