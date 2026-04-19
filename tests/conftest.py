@@ -25,7 +25,7 @@ def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(_cli_parse_args=False)
+    return Settings()
 
 
 @pytest.fixture
@@ -50,7 +50,7 @@ def make_token(
 @pytest.fixture
 def app() -> FastAPI:
     application = create_app()
-    application.extra["settings"] = Settings(_cli_parse_args=False)
+    application.extra["settings"] = Settings()
     return application
 
 

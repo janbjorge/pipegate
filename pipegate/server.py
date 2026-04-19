@@ -10,7 +10,6 @@ from contextlib import asynccontextmanager
 from typing import cast, get_args
 
 import orjson
-import uvicorn
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -32,13 +31,23 @@ from .schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _get_or_create_queue(
+    connection_id: str,
+    buffers: dict[str, asyncio.Queue[BufferGateRequest]],
+    max_queue_depth: int,
+) -> asyncio.Queue[BufferGateRequest]:
+    if connection_id not in buffers:
+        buffers[connection_id] = asyncio.Queue(maxsize=max_queue_depth)
+    return buffers[connection_id]
+
+
 def create_app() -> FastAPI:
     buffers: dict[str, asyncio.Queue[BufferGateRequest]] = {}
     futures: dict[uuid.UUID, asyncio.Future[BufferGateResponse]] = {}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-        app.extra["settings"] = Settings(_cli_parse_args=False)
+        app.extra["settings"] = Settings()
         app.extra["buffers"] = buffers
         try:
             yield
@@ -78,9 +87,7 @@ def create_app() -> FastAPI:
         future: asyncio.Future[BufferGateResponse] = asyncio.Future()
         futures[correlation_id] = future
 
-        if connection_id not in buffers:
-            buffers[connection_id] = asyncio.Queue(maxsize=settings.max_queue_depth)
-        queue = buffers[connection_id]
+        queue = _get_or_create_queue(connection_id, buffers, settings.max_queue_depth)
 
         try:
             queue.put_nowait(
@@ -147,9 +154,7 @@ def create_app() -> FastAPI:
         await websocket.accept()
         logger.info("WebSocket connected: %s", connection_id)
 
-        if connection_id not in buffers:
-            buffers[connection_id] = asyncio.Queue(maxsize=settings.max_queue_depth)
-        queue = buffers[connection_id]
+        queue = _get_or_create_queue(connection_id, buffers, settings.max_queue_depth)
 
         async def receive() -> None:
             try:
@@ -201,8 +206,3 @@ def create_app() -> FastAPI:
         buffers.pop(connection_id, None)
 
     return app
-
-
-if __name__ == "__main__":
-    app = create_app()
-    uvicorn.run(app, host="0.0.0.0", port=8000)

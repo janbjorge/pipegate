@@ -8,6 +8,21 @@ import jwt
 from .schemas import JWTPayload, Settings
 
 
+def generate_token(connection_id: str | None, settings: Settings) -> tuple[str, str]:
+    """Create a connection ID and signed JWT. Returns (connection_id, bearer_token)."""
+    cid = connection_id or uuid.uuid4().hex
+    payload = JWTPayload(
+        sub=cid,
+        exp=int((datetime.now(UTC) + timedelta(days=21)).timestamp()),
+    )
+    token = jwt.encode(
+        payload.model_dump(mode="json"),
+        key=settings.jwt_secret.get_secret_value(),
+        algorithm=settings.jwt_algorithms[0],
+    )
+    return cid, token
+
+
 def verify_token(token: str, settings: Settings) -> JWTPayload:
     """Decode and verify a JWT, returning the payload (connection ID in ``sub``)."""
     decoded = jwt.decode(
@@ -16,27 +31,3 @@ def verify_token(token: str, settings: Settings) -> JWTPayload:
         algorithms=settings.jwt_algorithms,
     )
     return JWTPayload.model_validate(decoded)
-
-
-def make_jwt_bearer() -> None:
-    """CLI helper: generate a connection ID and JWT token."""
-    settings = Settings(_cli_parse_args=True)  # #10: only here do we want CLI parsing
-    connection_id = settings.connection_id or uuid.uuid4().hex
-
-    jwt_payload = JWTPayload(
-        sub=connection_id,
-        exp=int((datetime.now(UTC) + timedelta(days=21)).timestamp()),
-    )
-
-    jwt_bearer = jwt.encode(
-        jwt_payload.model_dump(mode="json"),
-        key=settings.jwt_secret.get_secret_value(),
-        algorithm=settings.jwt_algorithms[0],
-    )
-
-    print(f"Connection-id: {connection_id}")
-    print(f"JWT Bearer:    {jwt_bearer}")
-
-
-if __name__ == "__main__":
-    make_jwt_bearer()

@@ -24,18 +24,32 @@ export PIPEGATE_JWT_SECRET="change-me-to-something-secret"
 export PIPEGATE_JWT_ALGORITHMS='["HS256"]'
 
 # Generate a tunnel token (21-day expiry)
-python -m pipegate.auth
+pipegate token
 # Connection-id: a1b2c3d4...
 # JWT Bearer:    eyJhbGci...
 
 # Run the server (on your public VPS)
-python -m pipegate.server
+pipegate server
 
 # Run the client (on your local machine, another terminal)
-python -m pipegate.client http://localhost:3000 "ws://yourserver:8000/?token=<jwt>"
+pipegate client http://localhost:3000 "ws://yourserver:8000/?token=<jwt>"
 ```
 
 Requests to `http://yourserver:8000/a1b2c3d4/anything` now reach `http://localhost:3000/anything`.
+
+## CLI
+
+```
+pipegate token [--connection-id ID]        Generate a JWT bearer token
+pipegate client TARGET_URL SERVER_URL      Start the tunnel client
+pipegate server [--host HOST] [--port N]   Start the server (default: 0.0.0.0:8000)
+```
+
+Pin a specific connection ID so your public URL stays stable across token renewals:
+
+```bash
+pipegate token --connection-id my-app
+```
 
 ## How It Works
 
@@ -67,10 +81,10 @@ export PIPEGATE_JWT_SECRET="my-secret"
 export PIPEGATE_JWT_ALGORITHMS='["HS256"]'
 
 # Generate token
-python -m pipegate.auth
+pipegate token
 
 # Client connects with the token
-python -m pipegate.client http://localhost:3000 "ws://server/?token=<jwt>"
+pipegate client http://localhost:3000 "ws://server/?token=<jwt>"
 ```
 
 External HTTP callers don't need the JWT. They only need the connection ID in the URL path. The server rejects WebSocket connections with missing, expired, or invalid tokens (close code 1008).

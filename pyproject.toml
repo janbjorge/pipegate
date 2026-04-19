@@ -21,6 +21,9 @@ dependencies = [
     "httpx>=0.27",
 ]
 
+[project.scripts]
+pipegate = "pipegate.cli:app"
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",

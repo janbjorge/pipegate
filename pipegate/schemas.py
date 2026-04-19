@@ -40,6 +40,7 @@ class JWTPayload(BaseModel):
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(cli_parse_args=False)
+
     connection_id: str | None = Field(alias="PIPEGATE_CONNECTION_ID", default=None)
     jwt_secret: SecretStr = Field(alias="PIPEGATE_JWT_SECRET")
     jwt_algorithms: list[str] = Field(alias="PIPEGATE_JWT_ALGORITHMS")

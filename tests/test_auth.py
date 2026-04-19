@@ -5,7 +5,7 @@ from datetime import timedelta
 import jwt
 import pytest
 
-from pipegate.auth import verify_token
+from pipegate.auth import generate_token, verify_token
 from pipegate.schemas import JWTPayload, Settings
 
 from .conftest import make_token
@@ -38,3 +38,40 @@ class TestVerifyToken:
     def test_empty_token(self, settings: Settings) -> None:
         with pytest.raises(jwt.DecodeError):
             verify_token("", settings)
+
+
+class TestGenerateToken:
+    def test_returns_tuple(self, settings: Settings) -> None:
+        cid, token = generate_token(None, settings)
+        assert isinstance(cid, str)
+        assert isinstance(token, str)
+
+    def test_generated_token_is_valid(self, settings: Settings) -> None:
+        cid, token = generate_token(None, settings)
+        payload = verify_token(token, settings)
+        assert payload.sub == cid
+
+    def test_pinned_connection_id(self, settings: Settings) -> None:
+        cid, token = generate_token("myconn", settings)
+        assert cid == "myconn"
+        payload = verify_token(token, settings)
+        assert payload.sub == "myconn"
+
+    def test_random_connection_id_when_none(self, settings: Settings) -> None:
+        cid1, _ = generate_token(None, settings)
+        cid2, _ = generate_token(None, settings)
+        assert cid1 != cid2
+
+    def test_token_expires_in_21_days(self, settings: Settings) -> None:
+        import time
+
+        _, token = generate_token(None, settings)
+        decoded = jwt.decode(
+            token,
+            settings.jwt_secret.get_secret_value(),
+            algorithms=settings.jwt_algorithms,
+        )
+        now = int(time.time())
+        days_21 = 21 * 24 * 3600
+        # Allow ±60s for test execution time
+        assert abs(decoded["exp"] - (now + days_21)) < 60
