@@ -75,8 +75,7 @@ def create_app() -> FastAPI:
                 detail=f"Request body exceeds limit of {settings.max_body_bytes} bytes",
             )
 
-        running_loop = asyncio.get_running_loop()
-        future: asyncio.Future[BufferGateResponse] = running_loop.create_future()
+        future: asyncio.Future[BufferGateResponse] = asyncio.Future()
         futures[correlation_id] = future
 
         if connection_id not in buffers:
