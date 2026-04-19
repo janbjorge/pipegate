@@ -23,7 +23,7 @@ from .conftest import make_token
 
 def _make_app() -> FastAPI:
     app = create_app()
-    app.extra["settings"] = Settings(_cli_parse_args=False)
+    app.extra["settings"] = Settings()
     return app
 
 
@@ -345,7 +345,7 @@ class TestBodySizeLimit:
 class TestQueueBackpressure:
     async def test_503_when_queue_full(self, connection_id: str) -> None:
         app = create_app()
-        settings = Settings(_cli_parse_args=False)
+        settings = Settings()
         settings.max_queue_depth = 1
         app.extra["settings"] = settings
 

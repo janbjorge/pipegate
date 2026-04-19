@@ -10,7 +10,6 @@ from contextlib import asynccontextmanager
 from typing import cast, get_args
 
 import orjson
-import uvicorn
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -38,7 +37,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-        app.extra["settings"] = Settings(_cli_parse_args=False)
+        app.extra["settings"] = Settings()
         app.extra["buffers"] = buffers
         try:
             yield
@@ -201,8 +200,3 @@ def create_app() -> FastAPI:
         buffers.pop(connection_id, None)
 
     return app
-
-
-if __name__ == "__main__":
-    app = create_app()
-    uvicorn.run(app, host="0.0.0.0", port=8000)

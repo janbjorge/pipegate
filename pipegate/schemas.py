@@ -34,15 +34,24 @@ class BufferGateResponse(BaseModel):
 
 
 class JWTPayload(BaseModel):
-    sub: str
-    exp: int
+    sub: str  # connection_id
+    exp: int  # expiry (unix)
+    nbf: int  # not before (unix)
+    iat: int  # issued at (unix)
+    iss: str  # issuer
+    aud: str  # audience
+    jti: str  # unique token id
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(cli_parse_args=False)
+
     connection_id: str | None = Field(alias="PIPEGATE_CONNECTION_ID", default=None)
     jwt_secret: SecretStr = Field(alias="PIPEGATE_JWT_SECRET")
     jwt_algorithms: list[str] = Field(alias="PIPEGATE_JWT_ALGORITHMS")
+    jwt_issuer: str = Field(alias="PIPEGATE_JWT_ISSUER", default="pipegate")
+    jwt_audience: str = Field(alias="PIPEGATE_JWT_AUDIENCE", default="pipegate")
+    jwt_ttl_days: int = Field(alias="PIPEGATE_JWT_TTL_DAYS", default=21)
     max_body_bytes: int = Field(
         alias="PIPEGATE_MAX_BODY_BYTES",
         default=10 * 1024 * 1024,

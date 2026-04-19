@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import time
 from datetime import timedelta
 
 import jwt
 import pytest
 
-from pipegate.auth import verify_token
+from pipegate.auth import TokenResult, generate_token, verify_token
 from pipegate.schemas import JWTPayload, Settings
 
 from .conftest import make_token
@@ -38,3 +39,76 @@ class TestVerifyToken:
     def test_empty_token(self, settings: Settings) -> None:
         with pytest.raises(jwt.DecodeError):
             verify_token("", settings)
+
+    def test_wrong_audience_rejected(
+        self, connection_id: str, settings: Settings
+    ) -> None:
+        token = make_token(connection_id, audience="other")
+        with pytest.raises(jwt.InvalidAudienceError):
+            verify_token(token, settings)
+
+    def test_wrong_issuer_rejected(
+        self, connection_id: str, settings: Settings
+    ) -> None:
+        token = make_token(connection_id, issuer="other")
+        with pytest.raises(jwt.InvalidIssuerError):
+            verify_token(token, settings)
+
+    def test_custom_issuer_and_audience(
+        self, connection_id: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PIPEGATE_JWT_ISSUER", "my-issuer")
+        monkeypatch.setenv("PIPEGATE_JWT_AUDIENCE", "my-audience")
+        s = Settings()
+        result = generate_token(s, connection_id=connection_id)
+        payload = verify_token(result.bearer, s)
+        assert payload.iss == "my-issuer"
+        assert payload.aud == "my-audience"
+
+
+class TestGenerateToken:
+    def test_returns_token_result(self, settings: Settings) -> None:
+        result = generate_token(settings)
+        assert isinstance(result, TokenResult)
+        assert isinstance(result.connection_id, str)
+        assert isinstance(result.bearer, str)
+
+    def test_generated_token_is_valid(self, settings: Settings) -> None:
+        result = generate_token(settings)
+        payload = verify_token(result.bearer, settings)
+        assert payload.sub == result.connection_id
+
+    def test_explicit_id_takes_precedence(self, settings: Settings) -> None:
+        result = generate_token(settings, connection_id="explicit")
+        assert result.connection_id == "explicit"
+        assert verify_token(result.bearer, settings).sub == "explicit"
+
+    def test_falls_back_to_settings_connection_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PIPEGATE_CONNECTION_ID", "from-env")
+        assert generate_token(Settings()).connection_id == "from-env"
+
+    def test_explicit_overrides_settings_connection_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PIPEGATE_CONNECTION_ID", "from-env")
+        result = generate_token(Settings(), connection_id="explicit")
+        assert result.connection_id == "explicit"
+
+    def test_random_when_nothing_pinned(self, settings: Settings) -> None:
+        cid1 = generate_token(settings).connection_id
+        cid2 = generate_token(settings).connection_id
+        assert cid1 != cid2
+
+    def test_custom_ttl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PIPEGATE_JWT_TTL_DAYS", "7")
+        s = Settings()
+        result = generate_token(s)
+        payload = verify_token(result.bearer, s)
+        assert abs(payload.exp - (int(time.time()) + 7 * 24 * 3600)) < 60
+
+    def test_default_ttl_is_21_days(self, settings: Settings) -> None:
+        result = generate_token(settings)
+        payload = verify_token(result.bearer, settings)
+        assert abs(payload.exp - (int(time.time()) + 21 * 24 * 3600)) < 60

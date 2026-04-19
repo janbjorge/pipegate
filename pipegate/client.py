@@ -2,24 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import sys
 
 import httpx
 import orjson
-import typer
 from websockets.asyncio.client import ClientConnection, connect
 
 from .schemas import BufferGateRequest, BufferGateResponse
 
-app = typer.Typer()
-
 _BACKOFF_BASE: float = 1.0
 _BACKOFF_MAX: float = 60.0
-
-
-@app.command()
-def start_client(target_url: str, server_url: str) -> None:
-    """Start the PipeGate client to expose a local server."""
-    asyncio.run(main(target_url, server_url))
 
 
 async def handle_request(
@@ -43,7 +35,10 @@ async def handle_request(
             status_code=response.status_code,
         )
     except Exception as e:
-        typer.echo(f"Error processing request {request.correlation_id}: {e}", err=True)
+        print(
+            f"Error processing request {request.correlation_id}: {e}",
+            file=sys.stderr,
+        )
         payload = BufferGateResponse(
             correlation_id=request.correlation_id,
             headers="{}",
@@ -61,17 +56,20 @@ async def main(target_url: str, server_url: str) -> None:
         delay = min(_BACKOFF_BASE * (2**attempt), _BACKOFF_MAX)
 
         if attempt > 0:
-            typer.echo(f"Reconnecting in {delay:.0f}s (attempt {attempt + 1})...")
+            print(
+                f"Reconnecting in {delay:.0f}s (attempt {attempt + 1})...",
+                file=sys.stderr,
+            )
             await asyncio.sleep(delay)
 
-        typer.echo(f"Connecting to {server_url}...")
+        print(f"Connecting to {server_url}...")
 
         try:
             async with (
                 connect(server_url) as ws_client,
                 httpx.AsyncClient() as http_client,
             ):
-                typer.echo("Connected.")
+                print("Connected.")
                 attempt = 0
                 async with asyncio.TaskGroup() as tg:
                     while True:
@@ -86,16 +84,12 @@ async def main(target_url: str, server_url: str) -> None:
                         except asyncio.CancelledError:
                             raise
                         except Exception as e:
-                            typer.echo(f"Error receiving message: {e}", err=True)
+                            print(f"Error receiving message: {e}", file=sys.stderr)
         except asyncio.CancelledError:
             raise
         except (ConnectionRefusedError, OSError) as e:
-            typer.echo(f"Connection failed: {e}", err=True)
+            print(f"Connection failed: {e}", file=sys.stderr)
         except Exception as e:
-            typer.echo(f"Unexpected error: {e}", err=True)
+            print(f"Unexpected error: {e}", file=sys.stderr)
 
         attempt += 1
-
-
-if __name__ == "__main__":
-    app()

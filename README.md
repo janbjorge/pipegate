@@ -24,18 +24,39 @@ export PIPEGATE_JWT_SECRET="change-me-to-something-secret"
 export PIPEGATE_JWT_ALGORITHMS='["HS256"]'
 
 # Generate a tunnel token (21-day expiry)
-python -m pipegate.auth
+pipegate token
 # Connection-id: a1b2c3d4...
 # JWT Bearer:    eyJhbGci...
 
 # Run the server (on your public VPS)
-python -m pipegate.server
+pipegate server
 
 # Run the client (on your local machine, another terminal)
-python -m pipegate.client http://localhost:3000 "ws://yourserver:8000/?token=<jwt>"
+pipegate client http://localhost:3000 "ws://yourserver:8000/?token=<jwt>"
 ```
 
 Requests to `http://yourserver:8000/a1b2c3d4/anything` now reach `http://localhost:3000/anything`.
+
+## CLI
+
+```
+pipegate token [-c ID]              Generate a JWT bearer token
+pipegate client TARGET_URL WS_URL   Start the tunnel client
+pipegate server [--host H] [-p N]   Start the server (default: 0.0.0.0:8000)
+```
+
+Pin a connection ID so your public URL stays stable across token renewals:
+
+```bash
+# via flag (one-off)
+pipegate token --connection-id my-app
+
+# via env var (persistent)
+export PIPEGATE_CONNECTION_ID=my-app
+pipegate token
+```
+
+Flag takes precedence over the env var.
 
 ## How It Works
 
@@ -67,10 +88,10 @@ export PIPEGATE_JWT_SECRET="my-secret"
 export PIPEGATE_JWT_ALGORITHMS='["HS256"]'
 
 # Generate token
-python -m pipegate.auth
+pipegate token
 
 # Client connects with the token
-python -m pipegate.client http://localhost:3000 "ws://server/?token=<jwt>"
+pipegate client http://localhost:3000 "ws://server/?token=<jwt>"
 ```
 
 External HTTP callers don't need the JWT. They only need the connection ID in the URL path. The server rejects WebSocket connections with missing, expired, or invalid tokens (close code 1008).
@@ -83,6 +104,9 @@ Environment variables via pydantic-settings:
 |---|---|---|---|
 | `PIPEGATE_JWT_SECRET` | Yes | -- | Shared secret for JWT signing/verification |
 | `PIPEGATE_JWT_ALGORITHMS` | Yes | -- | Algorithm list, e.g. `'["HS256"]'` |
+| `PIPEGATE_JWT_ISSUER` | No | `pipegate` | JWT `iss` claim — must match on both sides |
+| `PIPEGATE_JWT_AUDIENCE` | No | `pipegate` | JWT `aud` claim — must match on both sides |
+| `PIPEGATE_JWT_TTL_DAYS` | No | `21` | Token lifetime in days |
 | `PIPEGATE_CONNECTION_ID` | No | random UUID | Pin a specific connection ID when generating tokens |
 | `PIPEGATE_MAX_BODY_BYTES` | No | 10 MB | Reject requests larger than this (413) |
 | `PIPEGATE_MAX_QUEUE_DEPTH` | No | 100 | Per-tunnel queue size before returning 503 |
