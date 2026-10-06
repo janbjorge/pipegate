@@ -31,6 +31,25 @@ class BufferGateResponse(BaseModel):
     headers: str
     body: str
     status_code: int
+    # True: the body follows in BufferGateChunk messages (server-sent events),
+    # and `body` here is empty.
+    stream: bool = False
+
+
+class BufferGateChunk(BaseModel):
+    """A piece of a streamed response body; `done` ends the stream."""
+
+    kind: Literal["chunk"] = "chunk"
+    correlation_id: uuid.UUID
+    body: str = ""
+    done: bool = False
+
+
+class BufferGateCancel(BaseModel):
+    """Server to client: the caller went away, stop streaming this response."""
+
+    kind: Literal["cancel"] = "cancel"
+    correlation_id: uuid.UUID
 
 
 class JWTPayload(BaseModel):

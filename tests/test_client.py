@@ -4,13 +4,19 @@ import asyncio
 import base64
 import contextlib
 import uuid
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import orjson
 
 from pipegate.client import handle_request, main
-from pipegate.schemas import BufferGateRequest, BufferGateResponse
+from pipegate.schemas import (
+    BufferGateCancel,
+    BufferGateChunk,
+    BufferGateRequest,
+    BufferGateResponse,
+)
 
 
 class TestHandleRequest:
@@ -147,3 +153,94 @@ class TestMainReconnect:
             await main("http://localhost:9000", "ws://fake:8000/conn")
 
         assert call_count >= 2
+
+
+class TestStreaming:
+    def _request(self) -> BufferGateRequest:
+        return BufferGateRequest(
+            correlation_id=uuid.uuid4(),
+            url_path="stream",
+            url_query=orjson.dumps([]).decode(),
+            method="GET",
+            headers=orjson.dumps({}).decode(),
+            body="",
+        )
+
+    async def test_event_stream_is_sent_as_head_and_pieces(self) -> None:
+        ws = AsyncMock()
+        request = self._request()
+
+        async def events() -> AsyncIterator[bytes]:
+            yield b"data: 1\n\n"
+            yield b"data: 2\n\n"
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream", "content-length": "18"},
+                content=events(),
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as http_client:
+            await handle_request("http://localhost:9000", request, http_client, ws)
+
+        sent = [orjson.loads(c.args[0]) for c in ws.send.call_args_list]
+        head = BufferGateResponse.model_validate(sent[0])
+        assert head.stream and head.status_code == 200 and head.body == ""
+        assert "content-length" not in orjson.loads(head.headers)
+        chunks = [BufferGateChunk.model_validate(m) for m in sent[1:]]
+        assert b"".join(base64.b64decode(c.body) for c in chunks) == (
+            b"data: 1\n\ndata: 2\n\n"
+        )
+        assert [c.done for c in chunks] == [False, False, True]
+
+    async def test_cancel_stops_a_stream(self) -> None:
+        request = self._request()
+        cancel = BufferGateCancel(correlation_id=request.correlation_id)
+        started = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def endless() -> AsyncIterator[bytes]:
+            try:
+                while True:
+                    started.set()
+                    yield b"data: tick\n\n"
+                    await asyncio.sleep(0.01)
+            finally:
+                stopped.set()
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, content=endless()
+            )
+
+        sent: list[str] = []
+        inbox: asyncio.Queue[str] = asyncio.Queue()
+        await inbox.put(request.model_dump_json())
+
+        ws = AsyncMock()
+        ws.recv.side_effect = inbox.get
+        ws.send.side_effect = sent.append
+        connect_cm = AsyncMock()
+        connect_cm.__aenter__.return_value = ws
+        connect_cm.__aexit__.return_value = False
+        real_client = httpx.AsyncClient
+
+        def mock_client(*a: object, **kw: object) -> httpx.AsyncClient:
+            return real_client(transport=httpx.MockTransport(handler))
+
+        with (
+            patch("pipegate.client.connect", return_value=connect_cm),
+            patch("pipegate.client.httpx.AsyncClient", side_effect=mock_client),
+        ):
+            task = asyncio.create_task(main("http://localhost:9000", "ws://fake/"))
+            await asyncio.wait_for(started.wait(), 2)
+            await inbox.put(cancel.model_dump_json())
+            await asyncio.wait_for(stopped.wait(), 2)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        assert BufferGateResponse.model_validate_json(sent[0]).stream
