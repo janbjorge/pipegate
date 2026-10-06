@@ -18,10 +18,13 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
 from .auth import verify_token
 from .schemas import (
+    BufferGateCancel,
+    BufferGateChunk,
     BufferGateRequest,
     BufferGateResponse,
     Methods,
@@ -32,8 +35,11 @@ logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
-    buffers: dict[str, asyncio.Queue[BufferGateRequest]] = {}
+    buffers: dict[str, asyncio.Queue[BufferGateRequest | BufferGateCancel]] = {}
     futures: dict[uuid.UUID, asyncio.Future[BufferGateResponse]] = {}
+    # Streamed bodies in flight: correlation id -> (connection id, pieces).
+    # None in the queue ends the body.
+    streams: dict[uuid.UUID, tuple[str, asyncio.Queue[bytes | None]]] = {}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -114,6 +120,9 @@ def create_app() -> FastAPI:
         finally:
             futures.pop(correlation_id, None)
 
+        if response.stream:
+            return stream_body(connection_id, correlation_id, response, request.method)
+
         response_content = (
             b""
             if request.method == "HEAD"
@@ -123,6 +132,43 @@ def create_app() -> FastAPI:
             content=response_content,
             headers=orjson.loads(response.headers) if response.headers else {},
             status_code=response.status_code,
+        )
+
+    def stream_body(
+        connection_id: str,
+        correlation_id: uuid.UUID,
+        head: BufferGateResponse,
+        method: str,
+    ) -> Response:
+        """The body of a streamed response, piece by piece as the client sends
+        it. If the caller goes away first, the client is told to stop."""
+        headers = orjson.loads(head.headers) if head.headers else {}
+
+        def cancel() -> None:
+            if streams.pop(correlation_id, None) is None:
+                return
+            queue = buffers.get(connection_id)
+            if queue is not None:
+                with contextlib.suppress(asyncio.QueueFull):
+                    queue.put_nowait(BufferGateCancel(correlation_id=correlation_id))
+
+        if method == "HEAD":
+            cancel()
+            return Response(headers=headers, status_code=head.status_code)
+
+        async def pieces() -> AsyncGenerator[bytes, None]:
+            entry = streams.get(correlation_id)
+            if entry is None:
+                return
+            try:
+                while (piece := await entry[1].get()) is not None:
+                    yield piece
+                streams.pop(correlation_id, None)
+            finally:
+                cancel()
+
+        return StreamingResponse(
+            pieces(), status_code=head.status_code, headers=headers
         )
 
     @app.websocket("/")
@@ -155,15 +201,32 @@ def create_app() -> FastAPI:
                 while True:
                     message_text = await websocket.receive_text()
                     try:
-                        message = BufferGateResponse.model_validate_json(message_text)
+                        data = orjson.loads(message_text)
+                        if isinstance(data, dict) and data.get("kind") == "chunk":
+                            chunk = BufferGateChunk.model_validate(data)
+                            entry = streams.get(chunk.correlation_id)
+                            if entry is not None:
+                                if chunk.body:
+                                    entry[1].put_nowait(base64.b64decode(chunk.body))
+                                if chunk.done:
+                                    entry[1].put_nowait(None)
+                            continue
+                        message = BufferGateResponse.model_validate(data)
                         future = futures.get(message.correlation_id)
                         if future and not future.done():
+                            # Ready before the caller resumes, so no piece
+                            # that follows the head is lost.
+                            if message.stream:
+                                streams[message.correlation_id] = (
+                                    connection_id,
+                                    asyncio.Queue(),
+                                )
                             future.set_result(message)
                         else:
                             logger.warning(
                                 "No pending future for: %s", message.correlation_id
                             )
-                    except ValidationError as ve:
+                    except (ValidationError, orjson.JSONDecodeError) as ve:
                         logger.warning("Invalid message format: %s", ve)
             except WebSocketDisconnect:
                 pass
@@ -198,5 +261,9 @@ def create_app() -> FastAPI:
 
         logger.info("WebSocket disconnected: %s", connection_id)
         buffers.pop(connection_id, None)
+        # Streams through this tunnel end with it.
+        for owner, pieces in list(streams.values()):
+            if owner == connection_id:
+                pieces.put_nowait(None)
 
     return app

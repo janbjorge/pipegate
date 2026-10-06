@@ -11,7 +11,12 @@ import orjson
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 
-from pipegate.schemas import BufferGateRequest, BufferGateResponse, Settings
+from pipegate.schemas import (
+    BufferGateChunk,
+    BufferGateRequest,
+    BufferGateResponse,
+    Settings,
+)
 from pipegate.server import create_app
 
 from .conftest import make_token
@@ -484,3 +489,96 @@ class TestQueueStability:
         assert not received_from_replacement, (
             "send() read from a replacement queue — it must use the captured queue ref"
         )
+
+
+# ---------------------------------------------------------------------------
+# Streamed responses (server-sent events)
+# ---------------------------------------------------------------------------
+
+
+async def _ws_stream(
+    app: FastAPI,
+    connection_id: str,
+    *,
+    pieces: list[bytes],
+    finish: str,
+) -> Response:
+    """HTTP -> WS forward -> streamed head and pieces -> HTTP. finish is
+    "done" (the client ends the body) or "disconnect" (the tunnel drops)."""
+    token = make_token(connection_id)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+
+        async def ws_client() -> None:
+            scope: dict[str, object] = {
+                "type": "websocket",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "path": "/",
+                "query_string": f"token={token}".encode(),
+                "headers": [],
+            }
+            inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            await inbox.put({"type": "websocket.connect"})
+            app_task = asyncio.create_task(
+                app(scope, inbox.get, outbox.put),  # type: ignore[arg-type]
+            )
+            assert (await asyncio.wait_for(outbox.get(), 5))[
+                "type"
+            ] == "websocket.accept"
+            msg = await asyncio.wait_for(outbox.get(), 5)
+            cid = json.loads(cast(str, msg["text"]))["correlation_id"]
+
+            async def say(model: BufferGateResponse | BufferGateChunk) -> None:
+                await inbox.put(
+                    {"type": "websocket.receive", "text": model.model_dump_json()}
+                )
+
+            await say(
+                BufferGateResponse(
+                    correlation_id=cid,
+                    headers=orjson.dumps(
+                        {"content-type": "text/event-stream"}
+                    ).decode(),
+                    body="",
+                    status_code=200,
+                    stream=True,
+                )
+            )
+            for piece in pieces:
+                await say(
+                    BufferGateChunk(
+                        correlation_id=cid, body=base64.b64encode(piece).decode()
+                    )
+                )
+            if finish == "done":
+                await say(BufferGateChunk(correlation_id=cid, done=True))
+            await asyncio.sleep(0.05)
+            await inbox.put({"type": "websocket.disconnect"})
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(app_task, timeout=2)
+
+        ws_task = asyncio.create_task(ws_client())
+        await asyncio.sleep(0.01)
+        resp = await asyncio.wait_for(client.get(f"/{connection_id}/stream"), 10)
+        await ws_task
+    return resp
+
+
+class TestStreaming:
+    async def test_pieces_reach_the_caller_in_order(self, connection_id: str) -> None:
+        pieces = [b"event: init\ndata: {}\n\n", b"data: 1\n\n", b"data: 2\n\n"]
+        resp = await _ws_stream(
+            _make_app(), connection_id, pieces=pieces, finish="done"
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert resp.content == b"".join(pieces)
+
+    async def test_stream_ends_when_the_tunnel_drops(self, connection_id: str) -> None:
+        app = _make_app()
+        resp = await _ws_stream(
+            app, connection_id, pieces=[b"data: 1\n\n"], finish="disconnect"
+        )
+        assert resp.content == b"data: 1\n\n"
